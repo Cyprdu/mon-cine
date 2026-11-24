@@ -10,13 +10,17 @@ struct FilmView: View {
     @State private var more = false
     @State private var trailer = false
     @State private var rating = false
-    @State private var scroll: CGFloat = 0
+    @State private var past = false
+    @State private var offers: [Offer]?
     @State private var showSeances = false
-    private var f: Film { d?.film ?? film }
-    private var recent: Bool {
-        guard let r = Jour.parse(f.release, "yyyy-MM-dd") else { return false }
-        return r > .now.addingTimeInterval(-100 * 86400) && r < .now.addingTimeInterval(21 * 86400)
+    private var f: Film {   // l’affiche déjà visible est gardée, sans changement à l’arrivée de la fiche
+        guard var x = d?.film else { return film }
+        x.poster = film.poster ?? x.poster; x.back = film.back ?? x.back
+        if x.overview.isEmpty { x.overview = film.overview }
+        return x
     }
+    private var inCine: Bool { offers?.contains { $0.kind == "CINEMA" } ?? Affiche.shared.has(film) || Affiche.shared.has(film) }
+    private var reissue: Bool { inCine && Affiche.old(f) }
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -34,7 +38,7 @@ struct FilmView: View {
                     watch
                     VStack(alignment: .leading, spacing: 14) {
                         RailHead(title: "Au cinéma", icon: "popcorn.fill")
-                        if recent || showSeances { FilmSeances(film: f, original: d?.original ?? "") } else {
+                        if inCine || showSeances { FilmSeances(film: f, original: d?.original ?? "") } else {
                             Button { Haptic.tap(); withAnimation(.snappy) { showSeances = true } } label: { Label("Chercher des séances", systemImage: "magnifyingglass").frame(maxWidth: .infinity).frame(height: 32) }.buttonStyle(.glass).padding(.horizontal, 18)
                         }
                     }.id("seances")
@@ -55,33 +59,34 @@ struct FilmView: View {
                 }.padding(.bottom, 40)
             }
             .ignoresSafeArea(edges: .top)
-            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, y in scroll = y }
+            .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 320 } action: { _, y in past = y }
         }
         .background { Ambient(path: f.back ?? f.poster) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).opacity(scroll > 380 ? 1 : 0).animation(.easeOut, value: scroll > 380) }
+            ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).opacity(past ? 1 : 0).animation(.easeOut, value: past) }
             ToolbarItem(placement: .topBarTrailing) { ShareLink(item: URL(string: "https://www.themoviedb.org/movie/\(f.id)?language=fr-FR")!, subject: Text(f.title)) }
         }
         .sheet(isPresented: $trailer) { if let k = d?.trailer { TrailerSheet(key: k, title: f.title) } }
         .sheet(isPresented: $rating) { RatingSheet(film: f).presentationDetents([.height(440)]) }
-        .task { await load() }
+        .task { async let a: Void = load(); offers = try? await JustWatch.shared.offers(film); if offers?.isEmpty == true, let o = d?.original, !o.isEmpty { offers = (try? await JustWatch.shared.offers(film, original: o)) ?? [] }; await a }
     }
     private func load() async {
         do { let x = try await TMDB.detail(film.id); withAnimation { d = x; err = nil } } catch is CancellationError {} catch { err = error.localizedDescription }
     }
     private var header: some View {
         ZStack(alignment: .bottomLeading) {
-            GeometryReader { g in
-                let y = max(0, g.frame(in: .scrollView).minY)
-                Color.clear.overlay { Pic(url: TMDB.img(f.back ?? f.poster, 1280)) { Blank(title: "") } }
-                    .frame(width: g.size.width, height: g.size.height + y).clipped().offset(y: -y)
-                    .mask { LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom).offset(y: -y) }
-                    .blur(radius: max(0, min(14, scroll / 28)))
-            }
+            Color.clear.overlay { ZStack { Pic(url: TMDB.img(film.poster, 342)) { Color.clear }.blur(radius: 24); Pic(url: TMDB.img(f.back ?? f.poster, 1280)) { Blank(title: "") } } }
+                .clipped()
+                .mask { LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom) }
+                .visualEffect { v, g in
+                    let y = max(0, g.frame(in: .scrollView).minY), h = max(1, g.size.height)
+                    return v.scaleEffect(1 + y / h, anchor: .bottom)
+                }
             HStack(alignment: .bottom, spacing: 16) {
                 Poster(path: f.poster, title: f.title, width: 118, size: 500).shadow(color: .black.opacity(0.6), radius: 18, y: 10)
                 VStack(alignment: .leading, spacing: 8) {
+                    if reissue { Ressortie() }
                     if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Color.clear }.frame(maxWidth: 210, maxHeight: 80, alignment: .leading).accessibilityLabel(f.title) }
                     else { Text(f.title).font(.system(.title, design: .rounded, weight: .heavy)).minimumScaleFactor(0.7).lineLimit(4) }
                     Text([f.upcoming ? "Sortie le " + Jour.jolie(f.release) : f.year, d?.runtime.map(Jour.duree)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline.weight(.semibold))
@@ -97,8 +102,9 @@ struct FilmView: View {
     private func actions(_ proxy: ScrollViewProxy) -> some View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
-                Button { Haptic.tap(); withAnimation(.snappy) { showSeances = true; proxy.scrollTo("seances", anchor: .top) } } label: { Label("Séances", systemImage: "ticket.fill").font(.headline).frame(maxWidth: .infinity).frame(height: 34).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.or)
-                if d?.trailer != nil { Button { Haptic.tap(); trailer = true } label: { Label("Bande-annonce", systemImage: "play.fill").font(.headline).lineLimit(1).minimumScaleFactor(0.8).frame(maxWidth: .infinity).frame(height: 34) }.buttonStyle(.glass) }
+                if inCine { Button { Haptic.tap(); withAnimation(.snappy) { proxy.scrollTo("seances", anchor: .top) } } label: { Label("Séances", systemImage: "ticket.fill").font(.headline).frame(maxWidth: .infinity).frame(height: 34).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.or) }
+                if !inCine || offers.flatMap({ store.direct($0) }) != nil { PlayButton(film: film, offers: offers, known: true) }
+                if d?.trailer != nil { Button { Haptic.tap(); trailer = true } label: { Label("Bande-annonce", systemImage: "film").labelStyle(.titleOnly).font(.headline).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity).frame(height: 34) }.buttonStyle(.glass) }
             }
             GlassEffectContainer(spacing: 14) {
                 HStack(spacing: 0) {
@@ -119,36 +125,17 @@ struct FilmView: View {
     }
     // MARK: Streaming
     @ViewBuilder private var watch: some View {
-        if let d, !(d.stream + d.free + d.rent + d.buy).isEmpty {
+        if let offers, offers.contains(where: { $0.kind != "CINEMA" }) {
             VStack(alignment: .leading, spacing: 14) {
-                RailHead(title: "Regarder maintenant", icon: "play.rectangle.fill")
-                ForEach([("Inclus dans l’abonnement", d.stream), ("Gratuit", d.free), ("Location", d.rent), ("Achat", d.buy)].filter { !$0.1.isEmpty }, id: \.0) { t, l in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(t).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 18)
-                        RailScroll { ForEach(l) { p in provider(p) } }
-                    }
-                }
-                Text("Ouvre la recherche du film dans l’app du service. Disponibilités : JustWatch.").font(.caption2).foregroundStyle(.tertiary).padding(.horizontal, 18)
+                RailHead(title: "Où regarder", icon: "play.rectangle.fill")
+                OfferList(offers: offers).padding(.horizontal, 18)
+                Text("Disponibilités en France : JustWatch.").font(.caption2).foregroundStyle(.tertiary).padding(.horizontal, 18)
             }
-        } else if d != nil, !recent, !f.upcoming {
+        } else if offers != nil || err != nil, let d, !(d.stream + d.free + d.rent + d.buy).isEmpty {
+            VStack(alignment: .leading, spacing: 14) { RailHead(title: "Où regarder", icon: "play.rectangle.fill"); ProviderList(film: film, d: d).padding(.horizontal, 18) }
+        } else if offers != nil, !inCine, !f.upcoming {
             Text("Pas disponible en streaming en France pour l’instant.").font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 18)
         }
-    }
-    private func provider(_ p: Provider) -> some View {
-        let mine = store.s.services.contains { $0.id == p.id }
-        return Button {
-            Haptic.ok()
-            if let u = Stream.url(p, f.title) ?? d?.watchLink { openURL(u) } else { store.say("Lien indisponible") }
-        } label: {
-            HStack(spacing: 10) {
-                Pic(url: TMDB.img(p.logo, 92)) { Color.white.opacity(0.12) }.frame(width: 38, height: 38).clipShape(.rect(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(p.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    if mine { Text("Mon abonnement").font(.caption2).foregroundStyle(Color.or) }
-                }
-                Image(systemName: "arrow.up.right").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-            }.padding(.horizontal, 12).frame(height: 58)
-        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
     }
     private func face(_ p: Person) -> some View {
         NavigationLink(value: Route.person(p)) {

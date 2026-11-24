@@ -4,9 +4,9 @@ import UserNotifications
 struct Saved: Codable {
     var likes: [Film] = [], later: [Film] = [], seen: [Film] = [], ratings: [Int: Rating] = [:]
     var cinemas: [Cinema] = [], agenda: [AgendaItem] = []
-    var services: [Provider] = [Provider(id: 8, name: "Netflix"), Provider(id: 119, name: "Prime Video"), Provider(id: 337, name: "Disney Plus")]
+    var services: [Provider] = []
     var order: [String] = [], hidden: Set<String> = []
-    var onboarded = false, lock = false
+    var onboarded = false, lock = false, picked = false
     init() {}
     init(from d: Decoder) throws {   // un champ absent (ancienne sauvegarde) garde sa valeur par défaut
         let c = try d.container(keyedBy: CodingKeys.self), z = Saved()
@@ -20,6 +20,7 @@ struct Saved: Codable {
         order = try c.decodeIfPresent([String].self, forKey: .order) ?? []
         hidden = try c.decodeIfPresent(Set<String>.self, forKey: .hidden) ?? []
         onboarded = try c.decodeIfPresent(Bool.self, forKey: .onboarded) ?? false
+        picked = try c.decodeIfPresent(Bool.self, forKey: .picked) ?? false
         lock = try c.decodeIfPresent(Bool.self, forKey: .lock) ?? false
     }
 }
@@ -61,7 +62,7 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
     }
     private func demo() {
         let f = Demo.films.compactMap(TMDB.film)
-        s.onboarded = true; s.likes = Array(f.prefix(5)); s.later = Array(f[5...8])
+        s.onboarded = true; s.picked = true; s.services = [Provider(id: 8, name: "Netflix")]; s.likes = Array(f.prefix(5)); s.later = Array(f[5...8])
         for (i, x) in f.prefix(4).enumerated() { s.ratings[x.id] = Rating(film: x, stars: 5 - Double(i) * 0.5, comment: "", date: .now) }
         s.cinemas = Salles.all.filter { ["P0012", "P3757"].contains($0.id) }
         if let c = s.cinemas.first { s.agenda = [AgendaItem(id: "d", filmID: 1, title: f[0].title, poster: nil, cinema: c, start: .now.addingTimeInterval(9000), end: .now.addingTimeInterval(16000), version: "VOST", formats: ["IMAX"], url: "https://example.com/")] }

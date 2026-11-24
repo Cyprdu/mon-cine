@@ -44,6 +44,7 @@ enum TMDB {
     static let demo = ProcessInfo.processInfo.arguments.contains("-demo")
     static func img(_ p: String?, _ w: Int) -> URL? {
         guard let p, !p.isEmpty else { return nil }
+        if p.hasPrefix("https://images.justwatch.com") { return URL(string: w >= 500 ? p.replacingOccurrences(of: "/s332/", with: "/s718/") : w <= 200 ? p.replacingOccurrences(of: "/s332/", with: "/s166/").replacingOccurrences(of: "/s1440/", with: "/s640/") : w <= 342 ? p.replacingOccurrences(of: "/s1440/", with: "/s640/") : p) }
         return p.hasPrefix("https://") ? URL(string: p) : URL(string: "https://image.tmdb.org/t/p/w\(w)\(p)")
     }
     static func get(_ path: String, _ params: [String: String] = [:], ttl: Double, key override: String? = nil) async throws -> J {

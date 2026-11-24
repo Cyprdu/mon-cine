@@ -195,9 +195,10 @@ struct Programmation: View {
             }
             ForEach(rows, id: \.0.id) { f, s in
                 HStack(alignment: .top, spacing: 14) {
-                    ACTile(film: f, caption: "", width: 86)
+                    ACTile(film: f, caption: "", width: 86, badge: false)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(f.title).font(.headline)
+                        if f.reissue { Ressortie() }
                         Text([f.runtime.map(Jour.duree), f.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                         if !f.director.isEmpty { Text("De " + f.director).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                         Slots(seances: s, cinema: cinema, title: f.title, poster: f.poster, filmID: nil, acID: f.movie).padding(.top, 6)

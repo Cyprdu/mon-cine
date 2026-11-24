@@ -61,21 +61,23 @@ struct SearchView: View {
     @State private var films: [Film] = []
     @State private var err: String?
     @State private var busy = false
-    private let genres: [(Int, String, String)] = [(28, "Action", "bolt.fill"), (12, "Aventure", "map.fill"), (16, "Animation", "paintpalette.fill"), (35, "Comédie", "theatermasks.fill"), (80, "Crime", "magnifyingglass"), (99, "Documentaire", "globe.europe.africa.fill"), (18, "Drame", "drop.fill"), (10751, "Famille", "figure.2.and.child.holdinghands"), (14, "Fantastique", "wand.and.stars"), (36, "Histoire", "building.columns.fill"), (27, "Horreur", "moon.fill"), (10402, "Musique", "music.note"), (9648, "Mystère", "questionmark.circle.fill"), (10749, "Romance", "heart.fill"), (878, "Science-fiction", "sparkles"), (53, "Thriller", "eye.fill"), (10752, "Guerre", "shield.fill"), (37, "Western", "sun.dust.fill")]
+    @State private var salles: [Cinema] = []
+    private let genres: [(String, String, String)] = [("cmy", "Comédie", "theatermasks.fill"), ("act", "Action", "bolt.fill"), ("drm", "Drame", "drop.fill"), ("trl", "Thriller", "eye.fill"), ("crm", "Policier", "magnifyingglass"), ("scf", "Science-fiction", "sparkles"), ("fml", "Famille", "figure.2.and.child.holdinghands"), ("ani", "Animation", "paintpalette.fill"), ("rma", "Romance", "heart.fill"), ("fnt", "Fantastique", "wand.and.stars"), ("hrr", "Horreur", "moon.fill"), ("doc", "Documentaire", "globe.europe.africa.fill"), ("war", "Guerre", "shield.fill"), ("msc", "Musique", "music.note"), ("hst", "Histoire", "building.columns.fill"), ("wsn", "Western", "sun.dust.fill")]
+    private var typing: Bool { q.trimmingCharacters(in: .whitespaces).count >= 2 }
     var body: some View {
         ScrollView {
-            if q.trimmingCharacters(in: .whitespaces).count < 2 {
+            if !typing {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    ForEach(genres, id: \.0) { g in
-                        NavigationLink(value: Route.grid(GridQuery(title: g.1, path: "/discover/movie", params: ["with_genres": "\(g.0)", "sort_by": "popularity.desc", "include_adult": "false"]))) {
-                            HStack { Text(g.1).font(.headline); Spacer(); Image(systemName: g.2).font(.title2).foregroundStyle(.white.opacity(0.8)) }.padding(16).frame(height: 84)
-                                .background(LinearGradient(colors: [Color(hue: Double(g.0 % 37) / 37, saturation: 0.6, brightness: 0.6).opacity(0.55), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), in: .rect(cornerRadius: 24))
-                                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24))
+                    ForEach(Array(genres.enumerated()), id: \.offset) { i, g in
+                        NavigationLink(value: Route.grid(GridQuery(title: g.1, path: "jw", params: ["genres": g.0, "mix": "1"]))) {
+                            HStack { Text(g.1).font(.headline).lineLimit(1).minimumScaleFactor(0.7); Spacer(); Image(systemName: g.2).font(.title2).foregroundStyle(.white.opacity(0.8)) }.padding(16).frame(height: 84)
+                                .background(LinearGradient(colors: [Color(hue: Double(i) / Double(genres.count), saturation: 0.6, brightness: 0.6).opacity(0.55), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), in: .rect(cornerRadius: 24))
+                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 24)).contentShape(.rect)
                         }.buttonStyle(Press())
                     }
                 }.padding(18)
             } else {
-                let c = Salles.search(q, near: pos.best, max: 4)
+                let c = salles
                 VStack(alignment: .leading, spacing: 16) {
                     if !c.isEmpty { RailHead(title: "Cinémas", icon: "popcorn.fill"); VStack(spacing: 6) { ForEach(c) { x in NavigationLink(value: Route.cinema(x)) { CinemaLine(cinema: x) }.buttonStyle(.plain) } }.card().padding(.horizontal, 18) }
                     RailHead(title: "Films", icon: "film.fill")
@@ -85,14 +87,24 @@ struct SearchView: View {
             }
         }
         .background(Ambient(path: nil)).navigationTitle("Recherche")
+        .scrollDismissesKeyboard(.immediately)
         .searchable(text: $q, prompt: "Film, cinéma, ville").autocorrectionDisabled()
         .task(id: q) {
             let s = q.trimmingCharacters(in: .whitespaces)
-            guard s.count >= 2 else { films = []; err = nil; return }
+            guard s.count >= 2 else { films = []; salles = []; err = nil; busy = false; return }
             busy = true
-            try? await Task.sleep(for: .milliseconds(450))
+            try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
-            do { let r = try await TMDB.search(s); withAnimation { films = r; err = nil } } catch is CancellationError { return } catch { if Task.isCancelled { return }; err = error.localizedDescription }
+            let near = pos.best
+            let c = await Task.detached { Salles.search(s, near: near, max: 4) }.value
+            if Task.isCancelled { return }
+            salles = c
+            do {
+                let r = try await TMDB.search(s)
+                await ImageBank.shared.prefetch(r.prefix(6).map { TMDB.img($0.poster, 342) })
+                if Task.isCancelled { return }
+                films = r; err = nil
+            } catch is CancellationError { return } catch { if Task.isCancelled { return }; err = error.localizedDescription }
             busy = false
         }
     }
@@ -120,7 +132,6 @@ struct KeyField: View {
 }
 struct SettingsView: View {
     @Environment(Store.self) private var store
-    @State private var providers: [Provider] = []
     @State private var cinemas = false
     @State private var importing = false
     @State private var exportFile: BackupFile?
@@ -134,21 +145,13 @@ struct SettingsView: View {
             }
             Section("Cinémas") { Button("Gérer mes cinémas (\(store.cinemas.count))") { cinemas = true } }
             Section { Toggle("Protéger les billets par Face ID", isOn: $store.s.lock) } header: { Text("Billets") } footer: { Text("Les billets restent uniquement sur cet iPhone, dans le dossier protégé de l’app.") }
-            Section("Mes abonnements") {
-                ForEach(providers) { p in
-                    let on = store.s.services.contains { $0.id == p.id }
-                    Button { Haptic.pick(); if on { store.s.services.removeAll { $0.id == p.id } } else { store.s.services.append(p) } } label: {
-                        HStack { Pic(url: TMDB.img(p.logo, 92)) { Color.white.opacity(0.1) }.frame(width: 32, height: 32).clipShape(.rect(cornerRadius: 8)); Text(p.name).foregroundStyle(.white); Spacer(); Image(systemName: on ? "checkmark.circle.fill" : "circle").contentTransition(.symbolEffect(.replace)) }
-                    }
-                }
-                if providers.isEmpty { Text("Disponible une fois la clé TMDB ajoutée.").foregroundStyle(.secondary) }
-            }
+            Section("Mes plateformes") { ServicePicker().padding(.vertical, 8) }
             Section { NavigationLink("Ordre et affichage des catégories") { RailOrder() } } header: { Text("Accueil") }
             Section {
                 Button("Exporter une sauvegarde") { if let d = try? JSONEncoder().encode(Backup(saved: store.s, tickets: store.tickets)) { exportFile = BackupFile(data: d); exporting = true } }
                 Button("Restaurer une sauvegarde") { importing = true }
             } header: { Text("Sauvegarde") } footer: { Text("Le fichier contient tes billets en clair : garde-le en lieu sûr.") }
-            Section { Text("Ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB. Streaming : JustWatch. Séances : AlloCiné (source non officielle, usage personnel).").font(.footnote).foregroundStyle(.secondary) }
+            Section { Text("Ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB. Catalogue et streaming : JustWatch. Séances : AlloCiné. Ces deux sources sont non officielles, pour un usage personnel.").font(.footnote).foregroundStyle(.secondary) }
         }
         .navigationTitle("Réglages").navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $cinemas) { CinemaPicker() }
@@ -161,7 +164,6 @@ struct SettingsView: View {
         .confirmationDialog("Remplacer tes données par cette sauvegarde ?", isPresented: Binding { restore != nil } set: { if !$0 { restore = nil } }, titleVisibility: .visible, presenting: restore) { b in
             Button("Remplacer", role: .destructive) { store.s = b.saved; store.tickets = b.tickets; store.upcoming.forEach(Rappel.set); Haptic.ok() }
         }
-        .task(id: store.hasKey) { guard store.hasKey, let l = try? await TMDB.providers() else { return }; providers = l; for i in store.s.services.indices { if let p = l.first(where: { $0.id == store.s.services[i].id }), store.s.services[i] != p { store.s.services[i] = p } } }
     }
 }
 struct BackupFile: FileDocument {
@@ -196,17 +198,25 @@ struct Welcome: View {
             MeshGradient(width: 3, height: 3, points: [[0, 0], [0.5, 0], [1, 0], [0, 0.5], [pulse ? 0.7 : 0.3, pulse ? 0.4 : 0.6], [1, 0.5], [0, 1], [0.5, 1], [1, 1]],
                          colors: [Color(hex: 0x2A0B3A), Color(hex: 0x5C1138), Color(hex: 0x12082B), Color(hex: 0x8A2A1B), Color(hex: 0xD9781E), Color(hex: 0x3A0F45), .fond, Color(hex: 0x1B0A2B), .fond]).ignoresSafeArea()
                 .onAppear { withAnimation(.easeInOut(duration: 5).repeatForever()) { pulse = true } }
-            VStack(spacing: 22) {
-                Spacer()
-                Image(systemName: ["popcorn.fill", "key.fill", "mappin.and.ellipse"][step]).font(.system(size: 64)).contentTransition(.symbolEffect(.replace)).frame(width: 140, height: 140).glassEffect(.regular, in: .circle)
-                Text(["Mon Ciné", "Ta clé TMDB", "Tes cinémas"][step]).font(.system(size: 40, weight: .heavy, design: .rounded)).contentTransition(.numericText())
-                Text(["Tes films, tes séances, tes billets.", "Elle donne accès aux films et reste dans le trousseau de ton iPhone.", "Pour voir directement les horaires près de chez toi."][step]).multilineTextAlignment(.center).foregroundStyle(.white.opacity(0.85)).padding(.horizontal, 30)
-                if step == 1 { if store.hasKey { Label("Clé enregistrée", systemImage: "checkmark.circle.fill").foregroundStyle(.green) } else { VStack(alignment: .leading, spacing: 16) { KeyField() }.card().padding(.horizontal, 24) } }
-                if step == 2 { Button("Choisir mes cinémas (\(store.cinemas.count))", systemImage: "plus") { cinemas = true }.buttonStyle(.glass).controlSize(.large) }
-                Spacer()
-                Button { Haptic.ok(); withAnimation(.bouncy) { if step < 2 { step += 1 } else { store.s.onboarded = true } } } label: { Text(step < 2 ? (step == 1 && !store.hasKey ? "Plus tard" : "Continuer") : "Commencer").font(.headline).frame(maxWidth: .infinity).frame(height: 38).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.white).padding(.horizontal, 24).padding(.bottom, 20)
-            }
+            ScrollView {
+                VStack(spacing: 20) {
+                    Image(systemName: ["popcorn.fill", "key.fill", "play.tv.fill", "mappin.and.ellipse"][step]).font(.system(size: 50)).contentTransition(.symbolEffect(.replace)).frame(width: 112, height: 112).glassEffect(.regular, in: .circle)
+                    Text(["Mon Ciné", "Ta clé TMDB", "Tes plateformes", "Tes cinémas"][step]).font(.system(size: 38, weight: .heavy, design: .rounded)).contentTransition(.numericText())
+                    Text(["Tes films, tes séances, tes billets.", "Elle sert aux fiches des films et reste dans le trousseau de ton iPhone.", "Touche celles que tu as : « Regarder » ouvrira directement le film dans leur app.", "Pour voir directement les horaires près de chez toi."][step]).multilineTextAlignment(.center).foregroundStyle(.white.opacity(0.85)).padding(.horizontal, 30)
+                    if step == 1 { if store.hasKey { Label("Clé enregistrée", systemImage: "checkmark.circle.fill").foregroundStyle(.green) } else { VStack(alignment: .leading, spacing: 16) { KeyField() }.card().padding(.horizontal, 24) } }
+                    if step == 2 { ServicePicker().card().padding(.horizontal, 18) }
+                    if step == 3 { Button("Choisir mes cinémas (\(store.cinemas.count))", systemImage: "plus") { cinemas = true }.buttonStyle(.glass).controlSize(.large) }
+                }.padding(.top, 70).padding(.bottom, 30).frame(maxWidth: .infinity)
+            }.scrollBounceBehavior(.basedOnSize)
         }
+        .safeAreaInset(edge: .bottom) {
+            Button { Haptic.ok(); withAnimation(.bouncy) { next() } } label: { Text(step == 3 || (store.s.onboarded && step == 2) ? "Commencer" : step == 1 && !store.hasKey ? "Plus tard" : "Continuer").font(.headline).frame(maxWidth: .infinity).frame(height: 38).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.white).padding(.horizontal, 24).padding(.bottom, 12)
+        }
+        .onAppear { if store.s.onboarded { step = 2 } }
         .sheet(isPresented: $cinemas) { CinemaPicker() }
+    }
+    private func next() {
+        if step == 2 { store.s.picked = true; if store.s.onboarded { return } }
+        if step < 3 { step += 1 } else { store.s.onboarded = true }
     }
 }

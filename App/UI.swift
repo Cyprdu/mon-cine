@@ -61,10 +61,14 @@ final class ImageBank {
     let mem = NSCache<NSURL, UIImage>()
     let session: URLSession = {
         let c = URLSessionConfiguration.default
-        c.urlCache = URLCache(memoryCapacity: 20 << 20, diskCapacity: 400 << 20); c.requestCachePolicy = .returnCacheDataElseLoad; c.timeoutIntervalForRequest = 20
+        c.urlCache = URLCache(memoryCapacity: 20 << 20, diskCapacity: 400 << 20); c.requestCachePolicy = .returnCacheDataElseLoad; c.timeoutIntervalForRequest = 20; c.httpMaximumConnectionsPerHost = 10
         return URLSession(configuration: c)
     }()
-    init() { mem.totalCostLimit = 150 << 20 }
+    init() { mem.totalCostLimit = 260 << 20 }
+    /// Affiches préparées avant d’arriver à l’écran
+    func prefetch(_ l: [URL?]) async {
+        await withTaskGroup(of: Void.self) { g in for u in l { if let u { g.addTask { _ = await self.load(u) } } } }
+    }
     func load(_ u: URL) async -> UIImage? {
         if let i = mem.object(forKey: u as NSURL) { return i }
         guard let (d, _) = try? await session.data(from: u), let i = UIImage(data: d), let p = await i.byPreparingForDisplay() else { return nil }
@@ -75,19 +79,24 @@ final class ImageBank {
 struct Pic<P: View>: View {
     let url: URL?
     var mode: ContentMode = .fill
+    var loading: Color = .clear
     @ViewBuilder var placeholder: P
     @State private var img: UIImage?
     @State private var shown: URL?
+    @State private var failed: URL?
     var body: some View {
+        // Image déjà en mémoire : affichée dès le premier rendu
+        let now = url.flatMap { ImageBank.shared.mem.object(forKey: $0 as NSURL) } ?? (shown == url ? img : nil)
         ZStack {
-            if let img, shown == url { Image(uiImage: img).resizable().aspectRatio(contentMode: mode).transition(.opacity) } else { placeholder }
+            if let now { Image(uiImage: now).resizable().aspectRatio(contentMode: mode).transition(.opacity) }
+            else if url == nil || failed == url { placeholder }
+            else { loading }
         }
         .task(id: url) {
-            guard let url else { img = nil; return }
-            if let i = ImageBank.shared.mem.object(forKey: url as NSURL) { img = i; shown = url; return }
+            guard let url, ImageBank.shared.mem.object(forKey: url as NSURL) == nil else { return }
             let i = await ImageBank.shared.load(url)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.35)) { img = i; shown = url }
+            withAnimation(.easeOut(duration: 0.2)) { if let i { img = i; shown = url } else { failed = url } }
         }
     }
 }
@@ -97,7 +106,7 @@ struct Poster: View {
     var width: CGFloat? = nil, size = 342
     var body: some View {
         Color.clear.aspectRatio(2 / 3, contentMode: .fit).frame(width: width)
-            .overlay { Pic(url: TMDB.img(path, size)) { Blank(title: title) } }
+            .overlay { Pic(url: TMDB.img(path, size), loading: .white.opacity(0.07)) { Blank(title: title) } }
             .clipShape(.rect(cornerRadius: 18, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 0.7) }
     }
@@ -188,11 +197,13 @@ struct FilmTile: View {
     let film: Film, source: String
     var width: CGFloat? = 132
     var caption: String? = nil
+    var incine = false
     @Environment(Store.self) private var store
     var body: some View {
         NavigationLink(value: Route.film(film, source)) {
             VStack(alignment: .leading, spacing: 7) {
                 Poster(path: film.poster, title: film.title, width: width)
+                    .overlay(alignment: .topLeading) { if Affiche.shared.reissue(film) { Ressortie(long: false).padding(6) } else if !incine, Affiche.shared.has(film) { Image(systemName: "popcorn.fill").font(.caption2).foregroundStyle(Color.or).padding(7).background(.black.opacity(0.6), in: .circle).padding(6).accessibilityLabel("Au cinéma") } }
                     .overlay(alignment: .bottomLeading) {
                         if let r = store.s.ratings[film.id] { Badge(text: r.stars.fr, icon: "star.fill", tint: .or).padding(7) }
                         else if let n = film.note, n > 0 { Badge(text: n.fr, icon: "chart.bar.fill", tint: .white).padding(7) }
@@ -223,7 +234,6 @@ struct Badge: View {
 struct Press: ButtonStyle {
     func makeBody(configuration c: Configuration) -> some View {
         c.label.scaleEffect(c.isPressed ? 0.95 : 1).brightness(c.isPressed ? 0.06 : 0).animation(.bouncy(duration: 0.28), value: c.isPressed)
-            .onChange(of: c.isPressed) { _, p in if p { Haptic.soft() } }
     }
 }
 struct RailScroll<Content: View>: View {
@@ -253,8 +263,7 @@ struct RailHead: View {
     }
 }
 struct Shimmer: ViewModifier {
-    @State private var on = false
-    func body(content: Content) -> some View { content.opacity(on ? 0.45 : 1).onAppear { withAnimation(.easeInOut(duration: 0.9).repeatForever()) { on = true } } }
+    func body(content: Content) -> some View { content.phaseAnimator([1.0, 0.5]) { v, p in v.opacity(p) } animation: { _ in .easeInOut(duration: 0.9) } }
 }
 struct GhostRail: View {
     var body: some View {
@@ -311,7 +320,6 @@ struct GridScreen: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 12)], spacing: 18) {
                 ForEach(q.films ?? films) { f in
                     FilmTile(film: f, source: "g-\(f.id)", width: nil)
-                        .scrollTransition { v, p in v.opacity(p.isIdentity ? 1 : 0.4).scaleEffect(p.isIdentity ? 1 : 0.94) }
                         .onAppear { if f.id == films.last?.id { Task { await more() } } }
                 }
             }.padding(18)
@@ -323,11 +331,12 @@ struct GridScreen: View {
     private func more() async {
         guard q.films == nil, !done, page < 25 else { return }
         do {
-            let l = try await TMDB.list(q.path, q.params, page: page + 1)
+            let l = try await Catalogue.list(q.path, q.params, page: page + 1)
+            Task { await ImageBank.shared.prefetch(l.map { TMDB.img($0.poster, 342) }) }
             page += 1; err = nil
             let new = l.filter { x in !films.contains { $0.id == x.id } }
             if l.isEmpty { done = true }
-            withAnimation { films += new }
+            films += new
         } catch is CancellationError {} catch { err = error.localizedDescription }
     }
 }
