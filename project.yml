@@ -1,0 +1,50 @@
+name: MonCine
+options:
+  bundleIdPrefix: fr.cyprdu
+  deploymentTarget: { iOS: "26.0" }
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  MonCine:
+    type: application
+    platform: iOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.cyprdu.moncine
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Mon Ciné
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleDevelopmentRegion: fr
+        CFBundleLocalizations: [fr]
+        UILaunchScreen: { UIColorName: LaunchBack }
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSCameraUsageDescription: Pour scanner le QR code de tes billets et cartes de cinéma.
+        NSLocationWhenInUseUsageDescription: Pour trier les cinémas du plus proche au plus loin. Ta position reste sur l’iPhone.
+        NSFaceIDUsageDescription: Pour protéger tes billets et cartes prépayées.
+        LSSupportsOpeningDocumentsInPlace: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Billet de cinéma
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.adobe.pdf, public.image]
+  MonCineTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies: [{ target: MonCine }]
+    settings: { base: { GENERATE_INFOPLIST_FILE: YES } }
+schemes:
+  MonCine:
+    build: { targets: { MonCine: all, MonCineTests: [test] } }
+    test: { targets: [MonCineTests] }

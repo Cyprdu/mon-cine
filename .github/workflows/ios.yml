@@ -1,0 +1,47 @@
+# Compile Mon Ciné sur un Mac de GitHub et publie un .ipa non signé (SideStore, AltStore ou Sideloadly le signe).
+name: iPhone
+on:
+  workflow_dispatch:
+  push: { branches: [main] }
+permissions: { contents: write }
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Projet
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate
+      - name: IPA
+        run: |
+          xcodebuild -project MonCine.xcodeproj -scheme MonCine -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 || { grep -E "error:" build.log | sort -u; exit 1; }
+          mkdir Payload && cp -R build/Build/Products/Release-iphoneos/MonCine.app Payload/
+          zip -qry MonCine.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with: { name: MonCine-ipa, path: MonCine.ipa }
+      - name: Tests et captures
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print([x["udid"] for k in sorted(d,reverse=True) if "iOS-26" in k for x in d[k] if "Pro" in x["name"] and "iPhone" in x["name"]][0])')
+          xcrun simctl boot "$UDID"; xcrun simctl bootstatus "$UDID"
+          xcodebuild -project MonCine.xcodeproj -scheme MonCine -destination "id=$UDID" -derivedDataPath sim CODE_SIGNING_ALLOWED=NO test > test.log 2>&1 && R=0 || R=1
+          grep -E "error:|Test Case.*(passed|failed|skipped)|Executed" test.log | sort -u
+          mkdir -p shots
+          xcrun simctl install "$UDID" sim/Build/Products/Debug-iphonesimulator/MonCine.app || exit 1
+          shot() { n=$1; shift; xcrun simctl launch --terminate-running-process "$UDID" fr.cyprdu.moncine -demo "$@"; sleep 9; xcrun simctl io "$UDID" screenshot "shots/$n.png"; sips -Z 1000 "shots/$n.png" >/dev/null; }
+          for t in home cine mine tickets search; do shot $t -tab $t; done
+          shot film -tab home -film YES
+          xcrun simctl launch --terminate-running-process "$UDID" fr.cyprdu.moncine; sleep 5; xcrun simctl io "$UDID" screenshot shots/welcome.png; sips -Z 1000 shots/welcome.png >/dev/null
+          exit $R
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: shots, path: shots }
+      - name: Publier
+        if: github.ref == 'refs/heads/main'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "Mon Ciné" --notes "IPA non signé, à installer avec SideStore, AltStore ou Sideloadly." --latest
+          gh release upload latest MonCine.ipa --clobber
