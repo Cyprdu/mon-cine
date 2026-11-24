@@ -76,7 +76,7 @@ struct RailDef: Identifiable, Hashable {
             jw("fr", "Cinéma français du moment", "flag.fill", ["countries": "FR", "min": "\(y - 2)"]),
             jw("frcmy", "Comédies françaises", "theatermasks.fill", ["countries": "FR", "genres": "cmy"]),
             jw("cult", "Comédies cultes françaises", "quote.bubble.fill", ["countries": "FR", "genres": "cmy", "max": "2005"]),
-            jw("top", "Les mieux notés par le public", "trophy.fill", ["sort": "IMDB_SCORE", "popular": "1"]),
+            RailDef(id: "top", title: "Les mieux notés par le public", icon: "trophy.fill", kind: .query("/discover/movie", ["sort_by": "vote_average.desc", "vote_count.gte": "5000", "include_adult": "false"])),
             jw("frtop", "Grands films français", "rosette", ["countries": "FR", "min": "1930", "max": "\(y - 8)"]),
             jw("polar", "Polars et thrillers français", "magnifyingglass", ["countries": "FR", "genres": "crm,trl"]),
             jw("classic", "Classiques du cinéma français", "film.fill", ["countries": "FR", "max": "1979"]),

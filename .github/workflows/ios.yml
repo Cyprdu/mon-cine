@@ -3,10 +3,12 @@ name: iPhone
 on:
   workflow_dispatch:
   push: { branches: [main] }
+concurrency: { group: ios, cancel-in-progress: true }
 permissions: { contents: write }
 jobs:
   build:
-    runs-on: macos-15
+    strategy: { fail-fast: false, matrix: { os: [macos-15-intel, macos-26] } }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -23,7 +25,7 @@ jobs:
           mkdir Payload && cp -R build/Build/Products/Release-iphoneos/MonCine.app Payload/
           zip -qry MonCine.ipa Payload
       - uses: actions/upload-artifact@v4
-        with: { name: MonCine-ipa, path: MonCine.ipa }
+        with: { name: "MonCine-ipa-${{ matrix.os }}", path: MonCine.ipa }
       - name: Tests et captures
         run: |
           UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print([x["udid"] for k in sorted(d,reverse=True) if "iOS-26" in k for x in d[k] if "Pro" in x["name"] and "iPhone" in x["name"]][0])')
@@ -39,7 +41,7 @@ jobs:
           exit $R
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: shots, path: shots }
+        with: { name: "shots-${{ matrix.os }}", path: shots }
       - name: Publier
         if: github.ref == 'refs/heads/main'
         env: { GH_TOKEN: "${{ github.token }}" }
