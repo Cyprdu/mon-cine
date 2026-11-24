@@ -12,7 +12,7 @@ import CoreHaptics
     /// Deux battements, comme un cœur
     static func heart() { play([(0, 0.6, 0.3), (0.12, 1, 0.6)]) }
     /// Montée de cinq petits chocs pour la note maximale
-    static func stars() { play((0..<5).map { (Double($0) * 0.07, 0.4 + Float($0) * 0.15, 0.3 + Float($0) * 0.15) }) }
+    static func stars() { play([(0, 0.4, 0.3), (0.07, 0.55, 0.45), (0.14, 0.7, 0.6), (0.21, 0.85, 0.75), (0.28, 1, 0.9)]) }
     private static func play(_ l: [(Double, Float, Float)]) {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
         do {
@@ -105,7 +105,8 @@ struct Poster: View {
 struct Blank: View {
     let title: String
     var body: some View {
-        let h = Double(title.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % 360) / 360
+        let n: Int = title.unicodeScalars.reduce(0) { (a: Int, c: Unicode.Scalar) -> Int in (a &* 31 &+ Int(c.value)) & 0xFFFF }
+        let h = Double(n % 360) / 360
         LinearGradient(colors: [Color(hue: h, saturation: 0.55, brightness: 0.55), Color(hue: (h + 0.12).truncatingRemainder(dividingBy: 1), saturation: 0.7, brightness: 0.2)], startPoint: .topLeading, endPoint: .bottomTrailing)
             .overlay { Text(title).font(.system(.headline, design: .rounded, weight: .bold)).multilineTextAlignment(.center).minimumScaleFactor(0.5).padding(10).foregroundStyle(.white.opacity(0.9)) }
     }

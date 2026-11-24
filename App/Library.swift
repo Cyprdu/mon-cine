@@ -133,7 +133,7 @@ struct SettingsView: View {
                 if store.hasKey { LabeledContent("Clé", value: "Enregistrée"); Button("Retirer la clé", role: .destructive) { Trousseau.write(nil); store.hasKey = false } } else { KeyField() }
             }
             Section("Cinémas") { Button("Gérer mes cinémas (\(store.cinemas.count))") { cinemas = true } }
-            Section { Toggle("Protéger les billets par Face ID", isOn: $store.s.lock) } header: { Text("Billets") } footer: { Text("Les billets restent uniquement sur cet iPhone, dans un fichier chiffré quand l’appareil est verrouillé.") }
+            Section { Toggle("Protéger les billets par Face ID", isOn: $store.s.lock) } header: { Text("Billets") } footer: { Text("Les billets restent uniquement sur cet iPhone, dans le dossier protégé de l’app.") }
             Section("Mes abonnements") {
                 ForEach(providers) { p in
                     let on = store.s.services.contains { $0.id == p.id }

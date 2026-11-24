@@ -57,7 +57,7 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
     }
     private func save<T: Encodable>(_ v: T, _ n: String) {
         guard ready, !TMDB.demo else { return }
-        do { try JSONEncoder().encode(v).write(to: dir.appending(path: n), options: [.atomic, .completeFileProtection]) } catch { toast = "Enregistrement impossible" }
+        do { try JSONEncoder().encode(v).write(to: dir.appending(path: n), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) } catch { toast = "Enregistrement impossible" }
     }
     private func demo() {
         let f = Demo.films.compactMap(TMDB.film)
