@@ -97,7 +97,8 @@ struct RailDef: Identifiable, Hashable {
     var hero: [Film] = []
     var rails: [String: [Film]] = [:]
     var titles: [String: String] = [:]
-    var failed = false, ready = false
+    var failed = false
+    var ready = false
     @ObservationIgnored private var running = false
     func start(_ store: Store) async {
         guard !running else { return }

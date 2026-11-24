@@ -139,7 +139,10 @@ extension Store {
             if h.hasSuffix("disneyplus.com"), let x = URL(string: u.absoluteString.replacingOccurrences(of: "https://", with: "disneyplus://")) { l.append((x, false)) }
         }
         l.append((o.web, true))
-        for (u, universal) in l where await UIApplication.shared.open(u, options: universal ? [.universalLinksOnly: true] : [:]) { return }
+        for (u, universal) in l {
+            let ok = await UIApplication.shared.open(u, options: universal ? [.universalLinksOnly: true] : [:])
+            if ok { return }
+        }
         await UIApplication.shared.open(o.web)
     }
 }
