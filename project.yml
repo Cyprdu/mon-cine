@@ -20,7 +20,7 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: Mon Ciné
+        CFBundleDisplayName: Mon Cine
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDevelopmentRegion: fr

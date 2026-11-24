@@ -19,6 +19,7 @@ jobs:
       - name: IPA
         run: |
           xcodebuild -project MonCine.xcodeproj -scheme MonCine -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 || { grep -E "error:" build.log | sort -u; exit 1; }
+          for k in CFBundleName CFBundleDisplayName; do /usr/libexec/PlistBuddy -c "Print $k" build/Build/Products/Release-iphoneos/MonCine.app/Info.plist; done | LC_ALL=C grep -q "[^ -~]" && { echo "error: nom ASCII obligatoire (SideStore)"; exit 1; }
           mkdir Payload && cp -R build/Build/Products/Release-iphoneos/MonCine.app Payload/
           zip -qry MonCine.ipa Payload
       - uses: actions/upload-artifact@v4
