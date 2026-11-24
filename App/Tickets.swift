@@ -28,6 +28,13 @@ enum Code {
     static func read(_ img: CGImage) -> [(payload: String?, sym: String, crop: UIImage?)] {
         let r = VNDetectBarcodesRequest()
         try? VNImageRequestHandler(cgImage: img).perform([r])
+        if (r.results ?? []).isEmpty {   // second lecteur, pour les QR
+            let d = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+            return (d?.features(in: CIImage(cgImage: img)) ?? []).compactMap { $0 as? CIQRCodeFeature }.map { q in
+                let b = q.bounds, c = CGRect(x: b.minX, y: CGFloat(img.height) - b.maxY, width: b.width, height: b.height).insetBy(dx: -b.width * 0.08, dy: -b.height * 0.08)
+                return (q.messageString, "QR", img.cropping(to: c).map { UIImage(cgImage: $0) })
+            }
+        }
         return (r.results ?? []).map { o in
             let b = VNImageRectForNormalizedRect(o.boundingBox, img.width, img.height)
             let flip = CGRect(x: b.minX, y: CGFloat(img.height) - b.maxY, width: b.width, height: b.height).insetBy(dx: -b.width * 0.08, dy: -b.height * 0.08)
@@ -195,7 +202,7 @@ struct TicketsView: View {
         .toolbar { if busy { ProgressView() } else if !locked { menu } }
         .sheet(item: $open) { TicketSheet(ticket: $0).navigationTransition(.zoom(sourceID: $0.id, in: ns)) }
         .sheet(item: $drafts) { ImportReview(drafts: $0.list) }
-        .sheet(isPresented: $scanner) { Scanner { p, s in scanner = false; Haptic.ok(); Task { try? await Task.sleep(for: .seconds(0.5)); drafts = Drafts(list: [Importer.scan(p, s)]) } } }
+        .sheet(isPresented: $scanner) { Scanner { p, s in scanner = false; Haptic.ok(); Task { try? await Task.sleep(for: .seconds(0.5)); run { [Importer.scan(p, s)] } } } }
         .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: 12, matching: .images)
         .fileImporter(isPresented: $files, allowedContentTypes: [.pdf, .image], allowsMultipleSelection: true) { r in if let l = try? r.get() { run { l.flatMap(Importer.file) } } }
         .onChange(of: picked) {
