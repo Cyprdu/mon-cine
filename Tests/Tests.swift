@@ -21,6 +21,9 @@ final class Tests: XCTestCase {
         XCTAssertTrue(TMDB.quebecois("SPIDER-MAN LOIN DES SIENS", "Spider-Man : Far From Home", "Spider-Man : Loin des siens"))
         XCTAssertEqual(TMDB.nomSaga("Harry Potter - Saga"), "Harry Potter")
     }
+    func testLibre() {
+        XCTAssertNotNil(TMDB.libre(["homepage": "https://youtu.be/abcdefghijk"], 1)); XCTAssertNil(TMDB.libre(["homepage": "https://www.youtube.com/@chaine"], 1)); XCTAssertNil(TMDB.libre(["homepage": "https://www.film.com"], 1))
+    }
     @MainActor func testLiens() {
         let p = Offer(provider: Provider(id: 119, name: "Amazon Prime Video"), kind: "RENT", deep: URL(string: "https://app.primevideo.com/watch?gti=1"), web: URL(string: "https://app.primevideo.com/detail?gti=1")!)
         XCTAssertFalse(Lecture.liens(p, lecture: false).contains { $0.0.absoluteString.contains("watch") }); XCTAssertTrue(Lecture.liens(p, lecture: true)[0].0.absoluteString.contains("watch"))

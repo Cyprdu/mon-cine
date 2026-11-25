@@ -140,6 +140,7 @@ enum TMDB {
         d.cleanPoster = clean("posters"); d.cleanBack = clean("backdrops")
         d.logo = await logo(j, titre: f.title)
         if let c = j["belongs_to_collection"] as? J, let i = c["id"] as? Int { d.saga = Saga(id: i, nom: Self.nomSaga(c["name"] as? String ?? "")) }
+        d.libre = libre(j, id)
         if let w = ((j["watch/providers"] as? J)?["results"] as? J)?["FR"] as? J {
             func prov(_ k: String) -> [Provider] { ((w[k] as? [J]) ?? []).compactMap(provider) }
             d.stream = prov("flatrate"); d.free = prov("free") + prov("ads"); d.rent = prov("rent"); d.buy = prov("buy")
@@ -147,6 +148,18 @@ enum TMDB {
         }
         d.similar = (((j["recommendations"] as? J)?["results"] as? [J]) ?? []).compactMap(film)
         return d
+    }
+    /// Film entier publié gratuitement par ses auteurs : lien connu, ou site officiel de la fiche TMDB quand c’est une vidéo
+    private static let publies = [1716849: "https://www.youtube.com/watch?v=OCO9W9VPPc0"]
+    static func libre(_ j: J, _ id: Int) -> URL? {
+        let tr = ((j["translations"] as? J)?["translations"] as? [J]) ?? []
+        for s in [publies[id] ?? "", j["homepage"] as? String ?? ""] + tr.compactMap({ ($0["data"] as? J)?["homepage"] as? String }) {
+            guard let u = URL(string: s), ["https", "http"].contains(u.scheme ?? ""), let h = u.host()?.replacingOccurrences(of: "www.", with: "") else { continue }
+            let p = u.path()
+            let video = (h == "youtu.be" && p.count > 8) || (h.hasSuffix("youtube.com") && p == "/watch") || (h == "vimeo.com" && p.dropFirst().allSatisfy(\.isNumber) && p.count > 5) || (h == "dailymotion.com" && p.hasPrefix("/video/"))
+            if video { return u }
+        }
+        return nil
     }
     /// Logos dans l’ordre de préférence. Film non traduit en France : logo d’origine. Film traduit : logo français, jamais le québécois.
     static func logos(_ j: J, titre: String) -> (sur: [String], douteux: [String], quebec: String) {

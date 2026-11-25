@@ -28,7 +28,7 @@ struct FilmDetail {
     var original = "", runtime: Int?, tagline = "", genres: [String] = [], directors: [Person] = [], cast: [Person] = []
     var trailer: String?, logo: String?, votes = 0
     var stream: [Provider] = [], free: [Provider] = [], rent: [Provider] = [], buy: [Provider] = [], watchLink: URL?
-    var similar: [Film] = [], saga: Saga?
+    var similar: [Film] = [], saga: Saga?, libre: URL?
     var cleanPoster: String?, cleanBack: String?
     var saisons: [Saison] = [], prochain: String?, fini = false
 }

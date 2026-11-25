@@ -87,7 +87,14 @@ actor JustWatch {
         let l = try await packages().map(\.provider).filter { !$0.name.localizedCaseInsensitiveContains("with ads") && !$0.name.localizedCaseInsensitiveContains("sport") }
         return l.enumerated().sorted { (top.firstIndex(of: $0.element.id) ?? 100 + $0.offset) < (top.firstIndex(of: $1.element.id) ?? 100 + $1.offset) }.map(\.element)
     }
+    /// Offres du catalogue, plus le film entier mis en ligne gratuitement par ses auteurs
     func offers(_ film: Film, original: String = "") async throws -> [Offer] {
+        let libre = TMDB.demo ? nil : try? await TMDB.detail(film.id).libre
+        guard let u = libre ?? nil else { return try await catalogue(film, original: original) }
+        let h = u.host() ?? "", p = h.contains("vimeo") ? Provider(id: -2, name: "Vimeo") : h.contains("dailymotion") ? Provider(id: -3, name: "Dailymotion") : Provider(id: 192, name: "YouTube", logo: (try? await packages())?.first { $0.id == 192 }?.provider.logo)
+        return [Offer(provider: p, kind: "FREE", deep: nil, web: u)] + ((try? await catalogue(film, original: original)) ?? [])
+    }
+    private func catalogue(_ film: Film, original: String) async throws -> [Offer] {
         if TMDB.demo {
             let n = Offer(provider: Provider(id: 8, name: "Netflix"), kind: "FLATRATE", deep: URL(string: "https://www.netflix.com/watch/1"), web: URL(string: "https://www.netflix.com/title/1")!)
             return film.id.isMultiple(of: 2) ? [n] : [Offer(provider: Provider(id: 2140, name: "Cinémas Pathé"), kind: "CINEMA", deep: nil, web: URL(string: "https://www.pathe.fr")!)]
@@ -215,7 +222,8 @@ struct PlayButton: View {
                 busy = true; defer { busy = false }
                 let l: [Offer]
                 if let offers { l = offers } else { l = (try? await JustWatch.shared.offers(film)) ?? [] }
-                if let o = store.direct(l) { await Lecture.open(o) } else { Haptic.tap(); sheet = Offres(list: l.filter { $0.kind != "CINEMA" }) }
+                let seules = l.filter { $0.kind != "CINEMA" }
+                if let o = store.direct(l) { await Lecture.open(o) } else if seules.count == 1, seules[0].kind == "FREE" { await Lecture.open(seules[0]) } else { Haptic.tap(); sheet = Offres(list: l.filter { $0.kind != "CINEMA" }) }
             }
         } label: {
             HStack(spacing: 8) {
