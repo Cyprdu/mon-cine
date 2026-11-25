@@ -88,8 +88,9 @@ async function tour(e) {
     return;
   }
   // Un film jamais lu ou lu depuis plus de 12 h, puis les dates d’une de ses villes
-  const f = await e.DB.prepare("select tmdb,ac from films where ac is not null and (jw>? or suivi>?) and (lu is null or lu<?) order by (lu is not null), lu limit 1").bind(t - 2 * JOUR, t - 40 * JOUR, t - JOUR / 2).first();
-  if (f) await lire(e, f);
+  const fs = (await e.DB.prepare("select tmdb,ac,lu from films where ac is not null and (jw>? or suivi>?) and (lu is null or lu<?) order by (lu is not null), lu limit 2").bind(t - 2 * JOUR, t - 40 * JOUR, t - JOUR / 2).all()).results;
+  if (fs[0]) await lire(e, fs[0]);
+  if (fs[1] && !fs[1].lu) return lire(e, fs[1]);   // premier remplissage : d’abord tous les films
   const v = await e.DB.prepare("select ac,loc from villes where lu is null or lu<? order by (lu is not null), lu limit 1").bind(t - 3 * JOUR).first();
   if (v) {
     const h = await page(e, `${AC}${v.ac}/pres-de-${v.loc}/`);
