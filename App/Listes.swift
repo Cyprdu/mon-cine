@@ -1,9 +1,11 @@
 import SwiftUI
 
-struct Playlist: Codable, Hashable, Identifiable { var id = UUID().uuidString, nom: String, films: [Film] = [] }
+struct Playlist: Codable, Hashable, Identifiable { var id = UUID().uuidString; var nom: String; var films: [Film] = [] }
 struct Tier: Codable, Hashable, Identifiable {
-    var id = UUID().uuidString, nom: String
-    var rangs: [[Film]] = [[], [], [], [], [], []], reste: [Film] = []
+    var id = UUID().uuidString
+    var nom: String
+    var rangs: [[Film]] = [[], [], [], [], [], []]
+    var reste: [Film] = []
     static let lettres = ["S", "A", "B", "C", "D", "F"]
     static let teintes: [Color] = [.red, .orange, .yellow, .green, .cyan, .purple]
     var tous: [Film] { rangs.flatMap { $0 } + reste }
