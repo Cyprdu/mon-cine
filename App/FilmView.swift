@@ -4,7 +4,7 @@ import WebKit
 struct FilmView: View {
     let film: Film
     @Environment(Store.self) private var store
-    @Environment(\.openURL) private var openURL
+    @Environment(\.accessibilityReduceMotion) private var calm
     @State private var d: FilmDetail?
     @State private var err: String?
     @State private var more = false
@@ -12,14 +12,22 @@ struct FilmView: View {
     @State private var rating = false
     @State private var past = false
     @State private var offers: [Offer]?
-    @State private var showSeances = false
+    @State private var rep: Reprise?
+    @State private var bande = false
+    @State private var tick = 0
     private var f: Film {   // l’affiche déjà visible est gardée, sans changement à l’arrivée de la fiche
         guard var x = d?.film else { return film }
         x.poster = film.poster ?? x.poster; x.back = film.back ?? x.back
         if x.overview.isEmpty { x.overview = film.overview }
         return x
     }
-    private var inCine: Bool { offers?.contains { $0.kind == "CINEMA" } ?? Affiche.shared.has(film) || Affiche.shared.has(film) }
+    /// Film ancien : en salles seulement si la base lui connaît des villes
+    private var inCine: Bool {
+        if film.tv { return false }
+        let annonce = (offers?.contains { $0.kind == "CINEMA" } ?? false) || Affiche.shared.has(film)
+        if Affiche.old(f), let r = rep, r.lu != nil { return !r.lieux.isEmpty }
+        return annonce
+    }
     private var reissue: Bool { inCine && Affiche.old(f) }
     var body: some View {
         ScrollViewReader { proxy in
@@ -35,12 +43,13 @@ struct FilmView: View {
                             if f.overview.count > 180 { Button(more ? "Réduire" : "Lire la suite") { Haptic.tap(); withAnimation(.snappy) { more.toggle() } }.font(.subheadline.weight(.semibold)) }
                         }.padding(.horizontal, 18)
                     }
-                    VStack(alignment: .leading, spacing: 14) {
-                        RailHead(title: "Au cinéma", icon: "popcorn.fill")
-                        if inCine || showSeances { FilmSeances(film: f, original: d?.original ?? "") } else {
-                            Button { Haptic.tap(); withAnimation(.snappy) { showSeances = true } } label: { Label("Chercher des séances", systemImage: "magnifyingglass").frame(maxWidth: .infinity).frame(height: 32) }.buttonStyle(.glass).padding(.horizontal, 18)
-                        }
-                    }.id("seances")
+                    if inCine {
+                        VStack(alignment: .leading, spacing: 14) {
+                            RailHead(title: reissue ? "Ressortie au cinéma" : "Au cinéma", icon: "popcorn.fill")
+                            FilmSeances(film: f, original: d?.original ?? "", runtime: d?.runtime, reprise: rep)
+                        }.id("seances")
+                    }
+                    if let d, !d.saisons.isEmpty { SaisonsView(film: f, saisons: d.saisons) }
                     if let d {
                         if !(d.directors + d.cast).isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
@@ -59,19 +68,29 @@ struct FilmView: View {
             }
             .ignoresSafeArea(edges: .top).scrollEdgeEffectHidden(!past, for: .top)
             .background(Color.fond)
+            .onScrollPhaseChange { _, p in if p != .idle { stop() } }
             .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 320 } action: { _, y in past = y }
         }
         .background { Color.fond.ignoresSafeArea() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).frame(maxWidth: 170).opacity(past ? 1 : 0).animation(.easeOut, value: past) }
-            if d?.trailer != nil { ToolbarItem(placement: .topBarTrailing) { Button("Bande-annonce", systemImage: "movieclapper.fill") { Haptic.tap(); trailer = true } } }
-            ToolbarItem(placement: .topBarTrailing) { ShareLink(item: URL(string: "https://www.themoviedb.org/movie/\(f.id)?language=fr-FR")!, subject: Text(f.title)) }
+            if d?.trailer != nil { ToolbarItem(placement: .topBarTrailing) { Button("Bande-annonce", systemImage: "movieclapper.fill") { Haptic.tap(); stop(); trailer = true } } }
+            ToolbarItem(placement: .topBarTrailing) { ShareLink(item: f.web, subject: Text(f.title)) }
         }
         .sheet(isPresented: $trailer) { if let k = d?.trailer { TrailerSheet(key: k, title: f.title) } }
         .sheet(isPresented: $rating) { RatingSheet(film: f).presentationDetents([.height(440)]) }
+        .onDisappear { bande = false }
+        .task(id: "\(tick)|\(d?.trailer ?? "")|\(past)|\(trailer || rating)") {
+            bande = false
+            guard !calm, !past, !trailer, !rating, d?.trailer != nil, !ProcessInfo.processInfo.isLowPowerModeEnabled else { return }
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { bande = true }
+        }
+        .task { if !film.tv { rep = await Registre.shared.reprise(film) } }
         .task { async let a: Void = load(); offers = try? await JustWatch.shared.offers(film); if offers?.isEmpty == true, let o = d?.original, !o.isEmpty { offers = (try? await JustWatch.shared.offers(film, original: o)) ?? [] }; await a }
     }
+    private func stop() { if bande { withAnimation(.easeOut(duration: 0.3)) { bande = false } }; tick += 1 }
     private func load() async {
         do { let x = try await TMDB.detail(film.id); withAnimation { d = x; err = nil } } catch is CancellationError {} catch { err = error.localizedDescription }
     }
@@ -81,16 +100,19 @@ struct FilmView: View {
         return ZStack(alignment: .bottom) {
             Color.clear
                 .overlay(alignment: .top) { if ready { Pic(url: TMDB.img(art.path, 780)) { Blank(title: "") } } }
-                .frame(height: 540).clipped()
+                .frame(height: 540)
+                .overlay { if bande, let k = d?.trailer { Bande(key: k) } }
+                .clipped()
                 .overlay { LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .clear, location: 0.2), .init(color: .clear, location: 0.45), .init(color: .fond.opacity(0.9), location: 0.92), .init(color: .fond, location: 1)], startPoint: .top, endPoint: .bottom) }
                 .accessibilityHidden(true)
             VStack(spacing: 10) {
                 if reissue { Ressortie() }
                 if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Text(f.title).font(.largeTitle.bold()) }.frame(maxWidth: 290, maxHeight: 110).shadow(color: .black.opacity(0.5), radius: 10).accessibilityElement().accessibilityLabel(f.title).accessibilityAddTraits(.isHeader) }
                 else if ready { Text(f.title).font(.system(size: 34, weight: .heavy, design: .rounded)).multilineTextAlignment(.center).minimumScaleFactor(0.6).lineLimit(3).shadow(color: .black.opacity(0.6), radius: 10).accessibilityAddTraits(.isHeader) }
-                Text([f.upcoming ? "Sortie le " + Jour.jolie(f.release) : f.year, d?.runtime.map(Jour.duree), d?.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
+                Text([f.upcoming ? "Sortie le " + Jour.jolie(f.release) : f.year, d.flatMap { $0.saisons.isEmpty ? nil : "\($0.saisons.count) saison\($0.saisons.count > 1 ? "s" : "")" + ($0.fini ? "" : ", en cours") }, d?.runtime.map(Jour.duree), d?.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
                 HStack(spacing: 8) {
-                    if let n = f.note, n > 0 { Badge(text: n.fr + " / 10", icon: "person.3.fill") }
+                    if let n = f.sur5 { Badge(text: n + " / 5", icon: "person.3.fill") }
+                    if let p = d?.prochain { Badge(text: "Épisode " + Jour.jolie(p).lowercased(), icon: "calendar") }
                     if let r = store.s.ratings[f.id] { Badge(text: r.stars.fr + " / 5", icon: "star.fill", tint: .or) }
                 }
             }.padding(.horizontal, 24).frame(maxWidth: .infinity)
@@ -102,12 +124,14 @@ struct FilmView: View {
                 if inCine { Button { Haptic.tap(); withAnimation(.snappy) { proxy.scrollTo("seances", anchor: .top) } } label: { Label("Séances", systemImage: "ticket.fill").font(.headline).frame(maxWidth: .infinity).frame(height: 34).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.or) }
                 if watchable { PlayButton(film: film, offers: offers, known: true) }
             }
+            if !inCine && !f.tv && Affiche.old(f) && store.alerte(f.id) { Label("Alerte active : tu seras prévenu de sa ressortie", systemImage: "bell.badge.fill").font(.footnote).foregroundStyle(Color.or) }
             if !inCine && !watchable && loaded { Text(f.upcoming ? "Pas encore sorti" : "Pas disponible en streaming en France pour l’instant").font(.subheadline).foregroundStyle(.secondary) }
             GlassEffectContainer(spacing: 14) {
                 HStack(spacing: 0) {
                     labelled("J’aime") { HeartButton(film: f, big: true) }
                     round(store.isLater(f.id) ? "bookmark.fill" : "bookmark", "À voir", store.isLater(f.id)) { store.later(f) }
                     round(store.s.ratings[f.id] == nil ? "star" : "star.fill", "Noter", store.s.ratings[f.id] != nil) { Haptic.tap(); rating = true }
+                    if !f.tv && Affiche.old(f) { round(store.alerte(f.id) ? "bell.fill" : "bell", "Ressortie", store.alerte(f.id)) { store.alerter(f) } }
                     round(store.isSeen(f.id) ? "eye.fill" : "eye", "Vu", store.isSeen(f.id)) { store.seen(f) }
                 }
             }
@@ -185,4 +209,98 @@ struct YouTube: UIViewRepresentable {
     }
     func updateUIView(_ w: WKWebView, context: Context) {}
     static func dismantleUIView(_ w: WKWebView, coordinator: ()) { w.loadHTMLString("", baseURL: nil) }
+}
+
+/// Bande-annonce muette, sans lecteur ni geste ; l’image reste devant tant que la vidéo n’a pas vraiment démarré.
+struct Bande: View {
+    let key: String
+    @State private var visible = false
+    var body: some View {
+        GeometryReader { g in
+            let h = max(g.size.height, g.size.width * 9 / 16) * 1.06   // remplit le cadre, bords rognés
+            BandeWeb(key: key, visible: $visible).frame(width: h * 16 / 9, height: h).position(x: g.size.width / 2, y: g.size.height / 2)
+        }
+        .opacity(visible ? 1 : 0).animation(.easeInOut(duration: 0.8), value: visible).allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+struct BandeWeb: UIViewRepresentable {
+    let key: String
+    @Binding var visible: Bool
+    final class C: NSObject, WKScriptMessageHandler {
+        let set: (Bool) -> Void
+        init(_ s: @escaping (Bool) -> Void) { set = s }
+        func userContentController(_ u: WKUserContentController, didReceive m: WKScriptMessage) { set(m.body as? String == "on") }
+    }
+    func makeCoordinator() -> C { C { v in visible = v } }
+    func makeUIView(context: Context) -> WKWebView {
+        let c = WKWebViewConfiguration()
+        c.allowsInlineMediaPlayback = true; c.mediaTypesRequiringUserActionForPlayback = []
+        c.userContentController.add(context.coordinator, name: "etat")
+        let w = WKWebView(frame: .zero, configuration: c)
+        w.isOpaque = false; w.backgroundColor = .clear; w.scrollView.isScrollEnabled = false; w.isUserInteractionEnabled = false
+        w.loadHTMLString("""
+        <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="strict-origin-when-cross-origin">
+        <style>html,body,#p{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;border:0}</style><div id="p"></div>
+        <script src="https://www.youtube.com/iframe_api"></script>
+        <script>
+        function dis(m){webkit.messageHandlers.etat.postMessage(m)}
+        var vu=false;
+        function onYouTubeIframeAPIReady(){new YT.Player('p',{width:'100%',height:'100%',videoId:'\(key)',host:'https://www.youtube-nocookie.com',
+        playerVars:{autoplay:1,mute:1,controls:0,disablekb:1,fs:0,modestbranding:1,playsinline:1,rel:0,iv_load_policy:3,cc_load_policy:0,start:4,origin:'https://fr.cyprdu.moncine'},
+        events:{onReady:function(e){e.target.mute();e.target.playVideo()},onError:function(){dis('off')},
+        onStateChange:function(e){if(e.data===1&&!vu){vu=true;setTimeout(function(){dis('on')},2600)}if(e.data===0)dis('off')}}})}
+        </script>
+        """, baseURL: URL(string: "https://fr.cyprdu.moncine")!)
+        return w
+    }
+    func updateUIView(_ w: WKWebView, context: Context) {}
+    static func dismantleUIView(_ w: WKWebView, coordinator: C) {
+        w.configuration.userContentController.removeScriptMessageHandler(forName: "etat")
+        w.loadHTMLString("", baseURL: nil)
+    }
+}
+
+// MARK: Saisons et épisodes
+struct SaisonsView: View {
+    let film: Film, saisons: [Saison]
+    @Environment(Store.self) private var store
+    @State private var sel: Int?
+    @State private var list: [Episode] = []
+    @State private var all = false
+    @State private var err: String?
+    private var n: Int { sel ?? saisons.first?.id ?? 1 }
+    private func cle(_ e: Episode) -> String { "\(abs(film.id))-\(n)-\(e.n)" }
+    var body: some View {
+        let vus = list.filter { store.s.episodes.contains(cle($0)) }.count
+        VStack(alignment: .leading, spacing: 14) {
+            RailHead(title: "Épisodes", icon: "tv.fill")
+            ScrollView(.horizontal) { HStack(spacing: 8) { ForEach(saisons) { s in Chip(text: s.nom, on: s.id == n) { sel = s.id; all = false } } }.padding(.horizontal, 18) }.scrollIndicators(.hidden).scrollClipDisabled()
+            if !list.isEmpty {
+                HStack {
+                    Text("\(list.count) épisodes" + (vus > 0 ? " · \(vus) vu\(vus > 1 ? "s" : "")" : "")).font(.subheadline).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(vus == list.count ? "Tout décocher" : "Tout marquer vu") { Haptic.ok(); let k = list.map(cle); if vus == list.count { store.s.episodes.subtract(k) } else { store.s.episodes.formUnion(k) } }.font(.subheadline.weight(.semibold))
+                }.padding(.horizontal, 18)
+            }
+            if let err { Note(text: err).padding(.horizontal, 18) }
+            VStack(spacing: 0) {
+                ForEach(all ? list : Array(list.prefix(6))) { e in ligne(e) }
+                if list.count > 6 { Button(all ? "Réduire" : "Voir les \(list.count) épisodes") { Haptic.tap(); withAnimation(.snappy) { all.toggle() } }.buttonStyle(.glass).padding(.top, 10) }
+            }
+            if list.isEmpty && err == nil { ForEach(0..<3, id: \.self) { _ in RoundedRectangle(cornerRadius: 14).fill(.white.opacity(0.07)).frame(height: 76).modifier(Shimmer()) }.padding(.horizontal, 18) }
+        }
+        .task(id: n) { do { let l = try await TMDB.saison(film.id, n); await ImageBank.shared.prefetch(l.prefix(6).map { TMDB.img($0.image, 300) }); withAnimation { list = l; err = nil } } catch is CancellationError {} catch { list = []; err = error.localizedDescription } }
+    }
+    private func ligne(_ e: Episode) -> some View {
+        let vu = store.s.episodes.contains(cle(e))
+        return HStack(spacing: 12) {
+            Color.white.opacity(0.07).frame(width: 124, height: 70).overlay { Pic(url: TMDB.img(e.image, 300)) { Image(systemName: "tv").foregroundStyle(.secondary) } }.clipShape(.rect(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(e.n). \(e.titre)").font(.subheadline.weight(.semibold)).lineLimit(2)
+                Text([e.date.isEmpty ? nil : Jour.jolie(e.date), e.min.map(Jour.duree)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                if !e.texte.isEmpty { Text(e.texte).font(.caption2).foregroundStyle(.tertiary).lineLimit(1) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            Button { Haptic.pick(); if vu { store.s.episodes.remove(cle(e)) } else { store.s.episodes.insert(cle(e)) } } label: { Image(systemName: vu ? "checkmark.circle.fill" : "circle").font(.title3).foregroundStyle(vu ? Color.or : .secondary).frame(width: 44, height: 44).contentTransition(.symbolEffect(.replace)) }.buttonStyle(.plain).accessibilityLabel(vu ? "Marquer non vu" : "Marquer vu")
+        }.padding(.horizontal, 18).padding(.vertical, 7)
+    }
 }

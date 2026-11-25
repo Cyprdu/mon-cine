@@ -64,16 +64,46 @@ final class ImageBank {
         c.urlCache = URLCache(memoryCapacity: 20 << 20, diskCapacity: 400 << 20); c.requestCachePolicy = .returnCacheDataElseLoad; c.timeoutIntervalForRequest = 20; c.httpMaximumConnectionsPerHost = 10
         return URLSession(configuration: c)
     }()
-    init() { mem.totalCostLimit = 260 << 20 }
+    init() { mem.totalCostLimit = 420 << 20 }
     /// Affiches préparées avant d’arriver à l’écran
     func prefetch(_ l: [URL?]) async {
         await withTaskGroup(of: Void.self) { g in for u in l { if let u { g.addTask { _ = await self.load(u) } } } }
     }
+    private actor Shared {
+        var tasks: [URL: Task<UIImage?, Never>] = [:]
+        func get(_ u: URL, _ make: @escaping @Sendable () async -> UIImage?) async -> UIImage? {
+            if let t = tasks[u] { return await t.value }
+            let t = Task.detached(priority: .userInitiated) { await make() }
+            tasks[u] = t
+            let v = await t.value
+            tasks[u] = nil
+            return v
+        }
+    }
+    private let shared = Shared()
     func load(_ u: URL) async -> UIImage? {
         if let i = mem.object(forKey: u as NSURL) { return i }
-        guard let (d, _) = try? await session.data(from: u), let i = UIImage(data: d), let p = await i.byPreparingForDisplay() else { return nil }
-        mem.setObject(p, forKey: u as NSURL, cost: Int(p.size.width * p.size.height * p.scale * p.scale * 4))
-        return p
+        return await shared.get(u) { await self.fetch(u) }
+    }
+    private func fetch(_ u: URL) async -> UIImage? {
+        for n in 0..<4 {
+            var x = u
+            if n == 3 {   // dernier essai : même affiche en JPEG
+                guard u.host() == "images.justwatch.com", let j = URL(string: u.absoluteString.replacingOccurrences(of: ".webp", with: ".jpg")) else { break }
+                x = j
+            }
+            var r = URLRequest(url: x)
+            if n > 0 { r.cachePolicy = .reloadIgnoringLocalCacheData }
+            if let (d, res) = try? await session.data(for: r) {
+                if (res as? HTTPURLResponse)?.statusCode == 200, let i = UIImage(data: d), let p = await i.byPreparingForDisplay() {
+                    mem.setObject(p, forKey: u as NSURL, cost: Int(p.size.width * p.size.height * p.scale * p.scale * 4))
+                    return p
+                }
+                session.configuration.urlCache?.removeCachedResponse(for: r)
+            }
+            try? await Task.sleep(for: .milliseconds(350 * (n + 1)))
+        }
+        return nil
     }
 }
 struct Pic<P: View>: View {
@@ -206,12 +236,12 @@ struct FilmTile: View {
                     .overlay(alignment: .topLeading) { if Affiche.shared.reissue(film) { Ressortie(long: false).padding(6) } else if !incine, Affiche.shared.has(film) { Image(systemName: "popcorn.fill").font(.caption2).foregroundStyle(Color.or).padding(7).background(.black.opacity(0.6), in: .circle).padding(6).accessibilityLabel("Au cinéma") } }
                     .overlay(alignment: .bottomLeading) {
                         if let r = store.s.ratings[film.id] { Badge(text: r.stars.fr, icon: "star.fill", tint: .or).padding(7) }
-                        else if let n = film.note, n > 0 { Badge(text: n.fr, icon: "chart.bar.fill", tint: .white).padding(7) }
+                        else if let n = film.sur5 { Badge(text: n, icon: "star", tint: .white).padding(7) }
                     }
                     .overlay(alignment: .topTrailing) { if store.liked(film.id) { Image(systemName: "heart.fill").font(.caption).foregroundStyle(Color.rose).padding(8).background(.black.opacity(0.45), in: .circle).padding(6).transition(.scale.combined(with: .opacity)) } }
                     .modifier(ZoomSource(id: source))
                 Text(film.title).font(.footnote.weight(.semibold)).lineLimit(1).foregroundStyle(.white)
-                Text(caption ?? (film.upcoming ? "Le " + Jour.jolie(film.release) : film.year)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                Text(caption ?? (film.upcoming ? "Le " + Jour.jolie(film.release) : film.tv ? "Série · " + film.year : film.year)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }.frame(width: width)
         }
         .buttonStyle(Press())
@@ -219,7 +249,7 @@ struct FilmTile: View {
             Button(store.liked(film.id) ? "Retirer des favoris" : "J’aime", systemImage: store.liked(film.id) ? "heart.slash" : "heart") { store.like(film) }
             Button(store.isLater(film.id) ? "Retirer de « À voir »" : "À voir", systemImage: "bookmark") { store.later(film) }
             Button(store.isSeen(film.id) ? "Marquer non vu" : "Déjà vu", systemImage: "eye") { store.seen(film) }
-            ShareLink(item: URL(string: "https://www.themoviedb.org/movie/\(film.id)?language=fr-FR")!) { Label("Partager", systemImage: "square.and.arrow.up") }
+            ShareLink(item: film.web) { Label("Partager", systemImage: "square.and.arrow.up") }
         } preview: { Poster(path: film.poster, title: film.title, width: 260, size: 500) }
     }
 }
@@ -316,13 +346,14 @@ struct GridScreen: View {
     @State private var films: [Film] = []
     @State private var page = 0
     @State private var done = false
+    @State private var loading = false
     @State private var err: String?
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 12)], spacing: 18) {
                 ForEach(q.films ?? films) { f in
                     FilmTile(film: f, source: "g-\(f.id)", width: nil)
-                        .onAppear { if f.id == films.last?.id { Task { await more() } } }
+                        .onAppear { if let i = films.firstIndex(of: f), i == max(0, films.count - 10) { Task { await more() } } }
                 }
             }.padding(18)
             if let err { Note(text: err) { Task { await more() } }.padding(18) } else if films.isEmpty && q.films == nil && !done { ProgressView().padding(40) }
@@ -331,11 +362,12 @@ struct GridScreen: View {
         .task { if films.isEmpty { await more() } }
     }
     private func more() async {
-        guard q.films == nil, !done, page < 25 else { return }
+        guard q.films == nil, !done, !loading, page < 25 else { return }
+        loading = true; defer { loading = false }
         do {
             let l = try await Catalogue.list(q.path, q.params, page: page + 1)
-            Task { await ImageBank.shared.prefetch(l.map { TMDB.img($0.poster, 342) }) }
             page += 1; err = nil
+            await ImageBank.shared.prefetch(l.map { TMDB.img($0.poster, 342) })
             let new = l.filter { x in !films.contains { $0.id == x.id } }
             if l.isEmpty { done = true }
             films += new
@@ -360,9 +392,9 @@ struct PersonView: View {
         .background(Ambient(path: person.photo)).navigationBarTitleDisplayMode(.inline)
         .task {
             do {
-                let j = try await TMDB.get("/person/\(person.id)", ["append_to_response": "movie_credits"], ttl: 7 * 86400)
+                let j = try await TMDB.get("/person/\(person.id)", ["append_to_response": "combined_credits"], ttl: 7 * 86400)
                 bio = j["biography"] as? String ?? ""
-                let c = j["movie_credits"] as? J, dir = person.role == "Director"
+                let c = j["combined_credits"] as? J, dir = person.role == "Director"
                 let l = dir ? ((c?["crew"] as? [J]) ?? []).filter { $0["job"] as? String == "Director" } : (c?["cast"] as? [J]) ?? []
                 var seen = Set<Int>()
                 films = l.sorted { ($0["popularity"] as? Double ?? 0) > ($1["popularity"] as? Double ?? 0) }.compactMap(TMDB.film).filter { $0.poster != nil && seen.insert($0.id).inserted }

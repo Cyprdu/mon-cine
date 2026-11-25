@@ -10,8 +10,11 @@ enum Demo {
          "videos": ["results": [["site": "YouTube", "type": "Trailer", "key": "simulation1"]]] as J,
          "watch/providers": ["results": ["FR": ["link": "https://www.themoviedb.org", "flatrate": [["provider_id": 8, "provider_name": "Netflix"]], "rent": [["provider_id": 2, "provider_name": "Apple TV"]]] as J]] as J]
     }
+    static let series: [Film] = films.compactMap(TMDB.film).map { var f = $0; f.id = -f.id; return f }
     static func tmdb(_ p: String, _ q: [String: String]) -> J {
         if let m = p.wholeMatch(of: /\/movie\/(\d+)/), let i = Int(m.1), var f = films.first(where: { $0["id"] as? Int == i }) { f["recommendations"] = ["results": films]; return f }
+        if p.contains("/season/") { return ["episodes": (1...6).map { ["id": $0, "episode_number": $0, "name": "Épisode fictif \($0)", "overview": "Résumé fictif.", "air_date": "2026-01-0\($0)", "runtime": 48] as J }] }
+        if let m = p.wholeMatch(of: /\/tv\/(\d+)/), let i = Int(m.1), var f = films.first(where: { $0["id"] as? Int == i }) { f["name"] = f["title"]; f["title"] = nil; f["first_air_date"] = "2025-01-01"; f["seasons"] = [["season_number": 1, "episode_count": 6, "name": "Saison 1"]]; f["recommendations"] = ["results": [J]()] as J; return f }
         if p.contains("providers") { return ["results": [["provider_id": 8, "provider_name": "Netflix"], ["provider_id": 337, "provider_name": "Disney Plus"]]] }
         if q["page"] == "2" { return ["results": [J]()] }
         if let s = q["query"] { return ["results": films.filter { Match.plat($0["title"] as! String).contains(Match.plat(s)) }] }

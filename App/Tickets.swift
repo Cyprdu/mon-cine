@@ -199,7 +199,7 @@ struct TicketsView: View {
             }
         }
         .background(Ambient(path: nil)).navigationTitle("Billets")
-        .toolbar { if busy { ProgressView() } else if !locked { menu } }
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { if busy { ProgressView() } else if !locked { menu } } }
         .sheet(item: $open) { TicketSheet(ticket: $0).navigationTransition(.zoom(sourceID: $0.id, in: ns)) }
         .sheet(item: $drafts) { ImportReview(drafts: $0.list) }
         .sheet(isPresented: $scanner) { Scanner { p, s in scanner = false; Haptic.ok(); Task { try? await Task.sleep(for: .seconds(0.5)); run { [Importer.scan(p, s)] } } } }

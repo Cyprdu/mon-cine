@@ -5,8 +5,9 @@ import MapKit
 // MARK: Bandeau des jours et filtres
 struct DayStrip: View {
     @Binding var day: String
+    var only: [String]? = nil
     var body: some View {
-        let days = (0..<14).map { Jour.shift(Jour.cine(.now), $0) }, list = days.contains(day) ? days : days + [day]
+        let days = only ?? (0..<14).map { Jour.shift(Jour.cine(.now), $0) }, list = days.contains(day) ? days : (days + [day]).sorted()
         ScrollViewReader { p in
             ScrollView(.horizontal) {
                 GlassEffectContainer(spacing: 8) {
@@ -15,7 +16,7 @@ struct DayStrip: View {
                             let on = d == day, date = Jour.parse(d, "yyyy-MM-dd") ?? .now
                             Button { Haptic.pick(); withAnimation(.snappy) { day = d } } label: {
                                 VStack(spacing: 1) {
-                                    Text(d == days[0] ? "Auj." : Jour.fmt(date, "EEE").replacingOccurrences(of: ".", with: "").capitalized).font(.caption2.weight(.semibold))
+                                    Text(d == Jour.cine(.now) ? "Auj." : Jour.fmt(date, "EEE").replacingOccurrences(of: ".", with: "").capitalized).font(.caption2.weight(.semibold))
                                     Text(Jour.fmt(date, "d")).font(.title3.weight(.bold)).monospacedDigit()
                                     Text(Jour.fmt(date, "MMM").replacingOccurrences(of: ".", with: "")).font(.caption2)
                                 }.frame(width: 56, height: 68).foregroundStyle(on ? .black : .white)
@@ -67,7 +68,8 @@ struct Slots: View {
 func garde(_ l: [Seance], _ ver: String) -> [Seance] { l.filter { $0.start > .now && (ver.isEmpty || $0.version.hasPrefix(ver)) } }
 
 // MARK: Séances d’un film
-struct FilmSeances: View {
+/// Secours quand le film n’a pas de numéro AlloCiné connu : lecture cinéma par cinéma
+struct CinemasSeances: View {
     let film: Film, original: String
     @Environment(Store.self) private var store
     @Environment(Position.self) private var pos
@@ -79,6 +81,7 @@ struct FilmSeances: View {
     @State private var err: String?
     @State private var busy = false
     @State private var jumping = false
+    @State private var sauté = false
     @State private var retry = 0
     @State private var add = false
     private var useMine: Bool { mine && !store.cinemas.isEmpty }
@@ -140,6 +143,8 @@ struct FilmSeances: View {
                 withAnimation(.snappy) { got[c.id] = p }
             } catch is CancellationError { return } catch { if Task.isCancelled { return }; err = error.localizedDescription; if (error as? Oops)?.quota == true { return } }
         }
+        // Rien aujourd’hui : on cherche seul le prochain jour, une fois
+        if !sauté, d == Jour.cine(.now), !salles.contains(where: { c in films(got[c.id]).contains { !garde($0.seances, "").isEmpty } }) { sauté = true; busy = false; await jump() }
     }
     /// Jour après jour, en sautant les journées vides annoncées par AlloCiné ; une semaine par appui
     private func jump() async {
@@ -255,6 +260,16 @@ enum Plan {
 // MARK: Onglet Séances
 struct CineTab: View {
     @Environment(Store.self) private var store
+    @State private var billets = UserDefaults.standard.string(forKey: "tab") == "tickets"
+    var body: some View {
+        Group { if billets { TicketsView() } else { SeancesView() } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .principal) { Picker("Affichage", selection: $billets.animation(.snappy)) { Text("Séances").tag(false); Text("Billets").tag(true) }.pickerStyle(.segmented).frame(width: 210) } }
+            .onChange(of: store.pendingFile, initial: true) { if store.pendingFile != nil { billets = true } }
+    }
+}
+struct SeancesView: View {
+    @Environment(Store.self) private var store
     @State private var sel: String?
     @State private var add = false
     var body: some View {
@@ -270,7 +285,7 @@ struct CineTab: View {
             }.padding(.vertical, 12)
         }
         .background(Ambient(path: nil)).navigationTitle("Séances").scrollEdgeEffectStyle(.hard, for: .top)
-        .toolbar { Button("Ajouter un cinéma", systemImage: "plus") { add = true } }
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Ajouter un cinéma", systemImage: "plus") { add = true } } }
         .sheet(isPresented: $add) { CinemaPicker() }
     }
 }

@@ -11,7 +11,7 @@ struct Offer: Hashable, Identifiable {
 actor JustWatch {
     static let shared = JustWatch()
     private var last = Date.distantPast, pause = Date.distantPast
-    private static let fields = "objectId content(country:FR,language:\"fr\"){title originalReleaseYear originalReleaseDate shortDescription posterUrl backdrops{backdropUrl} scoring{tmdbScore} externalIds{tmdbId}}"
+    private static let fields = "objectId objectType content(country:FR,language:\"fr\"){title originalReleaseYear originalReleaseDate shortDescription posterUrl backdrops{backdropUrl} scoring{tmdbScore} externalIds{tmdbId}}"
 
     private func ask(_ q: String, _ vars: J, ttl: Double) async throws -> J {
         let body = try JSONSerialization.data(withJSONObject: ["query": q, "variables": vars] as J, options: .sortedKeys)
@@ -38,12 +38,12 @@ actor JustWatch {
     static func image(_ p: String?, _ profile: String) -> String? { p.map { "https://images.justwatch.com" + $0.replacingOccurrences(of: "{profile}", with: profile).replacingOccurrences(of: "{format}", with: "webp") } }
     static func film(_ n: J) -> Film? {
         guard let c = n["content"] as? J, let t = c["title"] as? String, let id = ((c["externalIds"] as? J)?["tmdbId"] as? String).flatMap({ Int($0) }), let p = c["posterUrl"] as? String else { return nil }
-        return Film(id: id, title: t.replacingOccurrences(of: "\u{a0}", with: " "), release: c["originalReleaseDate"] as? String ?? (c["originalReleaseYear"] as? Int).map { "\($0)-01-01" } ?? "", poster: image(p, "s332"),
+        return Film(id: n["objectType"] as? String == "SHOW" ? -id : id, title: t.replacingOccurrences(of: "\u{a0}", with: " "), release: c["originalReleaseDate"] as? String ?? (c["originalReleaseYear"] as? Int).map { "\($0)-01-01" } ?? "", poster: image(p, "s332"),
                     back: image(((c["backdrops"] as? [J])?.first)?["backdropUrl"] as? String, "s1440"), note: (c["scoring"] as? J)?["tmdbScore"] as? Double, overview: c["shortDescription"] as? String ?? "")
     }
     /// Filtres : genres, countries, packages (identifiants), cinema, min, max, runtime, sort
     func list(_ p: [String: String], page: Int = 1, size: Int = 24) async throws -> [Film] {
-        if TMDB.demo { return page > 1 ? [] : Demo.films.compactMap(TMDB.film) }
+        if TMDB.demo { return page > 1 ? [] : p["type"] == "tv" ? Demo.series : Demo.films.compactMap(TMDB.film) }
         if p["mix"] != nil {   // un film français pour un film étranger populaire en France
             var q = p; q["mix"] = nil
             let all = try await list(q, page: page, size: size)
@@ -53,7 +53,7 @@ actor JustWatch {
             for i in 0..<max(all.count, fr.count) { for l in [fr, all] where i < l.count && seen.insert(l[i].id).inserted { out.append(l[i]) } }
             return out
         }
-        var f: J = ["objectTypes": ["MOVIE"]]
+        var f: J = ["objectTypes": p["type"] == "tv" ? ["SHOW"] : p["type"] == "all" ? ["MOVIE", "SHOW"] : ["MOVIE"]]
         if let g = p["genres"] { f["genres"] = g.components(separatedBy: ",") }
         if let c = p["countries"] { f["productionCountries"] = [c] }
         if let k = p["packages"] {
@@ -93,9 +93,9 @@ actor JustWatch {
             return film.id.isMultiple(of: 2) ? [n] : [Offer(provider: Provider(id: 2140, name: "Cinémas Pathé"), kind: "CINEMA", deep: nil, web: URL(string: "https://www.pathe.fr")!)]
         }
         for t in [film.title, original] where !t.isEmpty {
-            let j = try await ask("query($f:TitleFilter!){popularTitles(country:FR,filter:$f,first:8,sortBy:POPULAR){edges{node{content(country:FR,language:\"fr\"){externalIds{tmdbId}} offers(country:FR,platform:IOS){monetizationType package{clearName packageId icon} standardWebURL deeplinkURL(platform:IOS)}}}}}", ["f": ["objectTypes": ["MOVIE"], "searchQuery": t] as J], ttl: 21600)
+            let j = try await ask("query($f:TitleFilter!){popularTitles(country:FR,filter:$f,first:8,sortBy:POPULAR){edges{node{content(country:FR,language:\"fr\"){externalIds{tmdbId}} offers(country:FR,platform:IOS){monetizationType package{clearName packageId icon} standardWebURL deeplinkURL(platform:IOS)}}}}}", ["f": ["objectTypes": [film.tv ? "SHOW" : "MOVIE"], "searchQuery": t] as J], ttl: 21600)
             let nodes = (((j["popularTitles"] as? J)?["edges"] as? [J]) ?? []).compactMap { $0["node"] as? J }
-            guard let n = nodes.first(where: { ((($0["content"] as? J)?["externalIds"] as? J)?["tmdbId"] as? String) == String(film.id) }) else { continue }
+            guard let n = nodes.first(where: { ((($0["content"] as? J)?["externalIds"] as? J)?["tmdbId"] as? String) == String(abs(film.id)) }) else { continue }
             var seen = Set<String>()
             return ((n["offers"] as? [J]) ?? []).compactMap { o -> Offer? in
                 guard let k = o["monetizationType"] as? String, let p = o["package"] as? J, let i = p["packageId"] as? Int, let w = (o["standardWebURL"] as? String).flatMap({ URL(string: $0) }), w.scheme == "https" else { return nil }
@@ -156,7 +156,12 @@ extension Store {
         else if let l = try? await TMDB.list("/movie/now_playing") { ids = Set(l.map(\.id)) }
         if TMDB.demo { ids = ids.filter { !$0.isMultiple(of: 2) } }
     }
-    func has(_ f: Film) -> Bool { ids.contains(f.id) }
+    /// Film ancien déjà relu par la base et sans aucune ville : il n’est plus en salles
+    func has(_ f: Film) -> Bool {
+        if f.tv { return false }
+        if Self.old(f), let r = Registre.shared.films[f.id], r.lu != nil { return !r.lieux.isEmpty }
+        return ids.contains(f.id)
+    }
     static func old(_ f: Film) -> Bool { Jour.parse(f.release, "yyyy-MM-dd").map { $0 < .now.addingTimeInterval(-540 * 86400) } ?? false }
     func reissue(_ f: Film) -> Bool { has(f) && Self.old(f) }
 }
@@ -199,7 +204,7 @@ struct PlayButton: View {
         } label: {
             HStack(spacing: 8) {
                 if busy { ProgressView().tint(.black) } else { Image(systemName: "play.fill") }
-                Text("Regarder")
+                Text("Regarder").lineLimit(1)
             }.font(.headline).frame(maxWidth: known ? .infinity : nil).frame(height: 34).padding(.horizontal, known ? 0 : 12).foregroundStyle(.black)
         }
         .buttonStyle(.glassProminent).tint(.white).disabled(busy)

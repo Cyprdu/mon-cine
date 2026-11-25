@@ -2,16 +2,20 @@ import SwiftUI
 
 @main struct MonCineApp: App {
     @State private var store = Store.shared
+    @Environment(\.scenePhase) private var phase
     var body: some Scene {
         WindowGroup {
             Root().environment(store).environment(Position.shared).preferredColorScheme(.dark).tint(.or)
                 .onOpenURL { if $0.isFileURL { store.pendingFile = $0 } }
                 .task(priority: .background) { Disk.purge() }
+                .task { try? await Task.sleep(for: .seconds(6)); await Veille.run(store) }
+                .onChange(of: phase) { _, p in if p == .background { Veille.planifier() } }
         }
+        .backgroundTask(.appRefresh(Veille.id)) { await Veille.planifier(); await Veille.run(Store.shared) }
     }
 }
 
-enum Onglet: String { case home, cine, mine, tickets, search }
+enum Onglet: String { case home, cine, mine, search }
 struct Root: View {
     @Environment(Store.self) private var store
     @State private var tab = Onglet(rawValue: UserDefaults.standard.string(forKey: "tab") ?? "") ?? .home
@@ -22,17 +26,18 @@ struct Root: View {
         @Bindable var store = store
         TabView(selection: $tab) {
             Tab("Accueil", systemImage: "play.tv.fill", value: Onglet.home) { Pile(path: path(.home)) { HomeView() } }
-            Tab("Séances", systemImage: "popcorn.fill", value: Onglet.cine) { Pile(path: path(.cine)) { CineTab() } }
+            Tab("Cinéma", systemImage: "popcorn.fill", value: Onglet.cine) { Pile(path: path(.cine)) { CineTab() } }
             Tab("Ma liste", systemImage: "heart.fill", value: Onglet.mine) { Pile(path: path(.mine)) { LibraryView() } }
-            Tab("Billets", systemImage: "ticket.fill", value: Onglet.tickets) { Pile(path: path(.tickets)) { TicketsView() } }
             Tab("Recherche", systemImage: "magnifyingglass", value: Onglet.search, role: .search) { Pile(path: path(.search)) { SearchView() } }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { Haptic.pick() }
-        .onChange(of: store.pendingFile) { if store.pendingFile != nil { tab = .tickets } }
+        .onChange(of: store.pendingFile) { if store.pendingFile != nil { tab = .cine } }
         .onAppear {
-            if store.pendingFile != nil { tab = .tickets }
+            if store.pendingFile != nil { tab = .cine }
+            if UserDefaults.standard.string(forKey: "tab") == "tickets" { tab = .cine }
             if TMDB.demo, UserDefaults.standard.bool(forKey: "film"), let f = store.likes.first { paths[.home] = [.film(f, "x")] }
+            if TMDB.demo, UserDefaults.standard.bool(forKey: "serie"), let f = Demo.series.first { paths[.home] = [.film(f, "x")] }
         }
         .overlay(alignment: .top) {
             if let t = store.toast {
@@ -55,20 +60,24 @@ struct Root: View {
 
 // MARK: Catégories
 struct RailDef: Identifiable, Hashable {
-    enum Kind: Hashable { case seances, likes, later, rated, cinema, because, query(String, [String: String]) }
+    enum Kind: Hashable { case seances, likes, later, rated, cinema, because, foryou, reissues, query(String, [String: String]) }
     var id: String, title: String, icon: String, kind: Kind, logo: String? = nil
+    var serie: Bool { if case .query(let p, let q) = kind { q["type"] == "tv" || p.hasPrefix("/tv") || p.hasSuffix("/tv") } else { false } }
+    static let vitrine: Set<String> = ["ttrend", "tfr", "tcrm", "tani"]
     @MainActor static func all(_ s: Store) -> [RailDef] {
         let y = Int(Jour.iso(.now).prefix(4)) ?? 2026
         func jw(_ id: String, _ t: String, _ i: String, _ p: [String: String]) -> RailDef { RailDef(id: id, title: t, icon: i, kind: .query("jw", p)) }
         var l = [
             RailDef(id: "seances", title: "Mes prochaines séances", icon: "calendar", kind: .seances),
             jw("now", "À l’affiche en France", "popcorn.fill", ["cinema": "1", "min": "\(y - 1)"]),
-            jw("reissue", "Ressorties exceptionnelles", "sparkles", ["cinema": "1", "max": "\(y - 2)"]),
+            RailDef(id: "reissue", title: "Ressorties au cinéma", icon: "sparkles", kind: .reissues),
+            RailDef(id: "foryou", title: "Recommandé pour toi", icon: "wand.and.stars", kind: .foryou),
             RailDef(id: "cinema", title: "Dans mon cinéma", icon: "mappin.and.ellipse", kind: .cinema),
             RailDef(id: "later", title: "À voir", icon: "bookmark.fill", kind: .later),
-            jw("trend", "Top 10 en France", "flame.fill", ["sort": "TRENDING"]),
+            jw("trend", "Top 10 en France", "flame.fill", ["sort": "TRENDING", "type": "all"]),
+            jw("ttrend", "Séries du moment", "tv.fill", ["type": "tv", "sort": "TRENDING"]),
         ]
-        for p in s.s.services { var r = jw("p\(p.id)", "Sur " + p.name.replacingOccurrences(of: "Amazon ", with: ""), "play.rectangle.fill", ["packages": "\(p.id)"]); r.logo = p.logo; l.append(r) }
+        for p in s.s.services { var r = jw("p\(p.id)", "Sur " + p.name.replacingOccurrences(of: "Amazon ", with: ""), "play.rectangle.fill", ["packages": "\(p.id)", "type": "all"]); r.logo = p.logo; l.append(r); var t = jw("tp\(p.id)", "Séries " + p.name.replacingOccurrences(of: "Amazon ", with: ""), "tv.fill", ["packages": "\(p.id)", "type": "tv"]); t.logo = p.logo; l.append(t) }
         l += [
             RailDef(id: "likes", title: "Mes coups de cœur", icon: "heart.fill", kind: .likes),
             RailDef(id: "rated", title: "Mes mieux notés", icon: "star.fill", kind: .rated),
@@ -86,6 +95,14 @@ struct RailDef: Identifiable, Hashable {
             l.append(jw("g" + g, t, i, ["genres": g, "mix": "1"]))
         }
         l += [jw("2000", "Succès des années 2000", "opticaldisc.fill", ["min": "2000", "max": "2009", "mix": "1"]), jw("90", "Cultes des années 90", "opticaldisc.fill", ["min": "1990", "max": "1999", "mix": "1"]), jw("80", "Cultes des années 80", "recordingtape", ["min": "1980", "max": "1989", "mix": "1"])]
+        func tv(_ id: String, _ t: String, _ i: String, _ p: [String: String]) -> RailDef { jw(id, t, i, p.merging(["type": "tv"]) { a, _ in a }) }
+        l += [
+            tv("tfr", "Séries françaises", "flag.fill", ["countries": "FR"]), tv("tcrm", "Séries policières", "magnifyingglass", ["genres": "crm,trl", "mix": "1"]), tv("tcmy", "Séries comiques", "face.smiling", ["genres": "cmy", "mix": "1"]),
+            RailDef(id: "ttop", title: "Séries les mieux notées", icon: "trophy.fill", kind: .query("/discover/tv", ["sort_by": "vote_average.desc", "vote_count.gte": "2000"])),
+            tv("tdrm", "Séries dramatiques", "drop.fill", ["genres": "drm"]), tv("tscf", "Science-fiction et fantastique", "sparkle.magnifyingglass", ["genres": "scf,fnt"]), tv("tact", "Action et aventure", "bolt.fill", ["genres": "act"]),
+            tv("tani", "Animés japonais", "paintpalette.fill", ["genres": "ani", "countries": "JP"]), tv("tkr", "Séries coréennes", "globe.asia.australia.fill", ["countries": "KR"]), tv("tgb", "Séries britanniques", "globe.europe.africa.fill", ["countries": "GB"]),
+            tv("tfml", "Séries en famille", "figure.2.and.child.holdinghands", ["genres": "fml"]), tv("tdoc", "Séries documentaires", "camera.fill", ["genres": "doc", "mix": "1"]), tv("told", "Séries cultes", "recordingtape", ["min": "1985", "max": "2009"]),
+        ]
         let pos = Dictionary(s.s.order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         return l.enumerated().sorted { (pos[$0.element.id] ?? 1000 + $0.offset) < (pos[$1.element.id] ?? 1000 + $1.offset) }.map(\.element)
     }
@@ -105,7 +122,8 @@ struct RailDef: Identifiable, Hashable {
         guard !running else { return }
         running = true; defer { running = false }
         async let a: Void = Affiche.shared.load()
-        let cine = (try? await Catalogue.list("jw", ["cinema": "1"])) ?? [], soft = (try? await Catalogue.list("jw", store.s.services.isEmpty ? ["sort": "TRENDING"] : ["packages": store.s.services.map { String($0.id) }.joined(separator: ",")])) ?? []
+        async let reg: Void = Registre.shared.load()
+        let cine = (try? await Catalogue.list("jw", ["cinema": "1"])) ?? [], soft = (try? await Catalogue.list("jw", store.s.services.isEmpty ? ["sort": "TRENDING", "type": "all"] : ["packages": store.s.services.map { String($0.id) }.joined(separator: ","), "type": "all"])) ?? []
         var h: [Film] = []
         for f in cine.prefix(5) + soft.prefix(4) where !h.contains(where: { $0.id == f.id }) { h.append(f) }
         failed = h.isEmpty
@@ -118,7 +136,10 @@ struct RailDef: Identifiable, Hashable {
             hero = h
         }
         await a
-        let defs = RailDef.all(store).filter { !store.s.hidden.contains($0.id) }
+        await reg
+        // Ce que l’accueil montre d’abord, puis les rayons réservés aux onglets Films et Séries
+        let tous = RailDef.all(store).filter { !store.s.hidden.contains($0.id) }
+        let defs = tous.filter { !$0.serie || RailDef.vitrine.contains($0.id) } + tous.filter { $0.serie && !RailDef.vitrine.contains($0.id) }
         for (n, d) in defs.enumerated() {
             await load(d, store)
             if n >= 4 { ready = true }
@@ -131,12 +152,36 @@ struct RailDef: Identifiable, Hashable {
         switch d.kind {
         case .query(let p, let q): l = (try? await Catalogue.list(p, q)) ?? rails[d.id] ?? []
         case .because:
-            if let s = Self.seed(store) { l = (try? await Catalogue.list("/movie/\(s.id)/recommendations", [:])) ?? rails[d.id] ?? []; titles[d.id] = "Parce que tu as aimé « \(s.title) »" }
+            if let s = Self.seed(store) { l = (try? await Catalogue.list(s.chemin + "/recommendations", [:])) ?? rails[d.id] ?? []; titles[d.id] = "Parce que tu as aimé « \(s.title) »" }
+        case .foryou: l = await Self.conseils(store)
+        case .reissues: l = Registre.shared.ready ? Array(Registre.shared.proches(Position.shared.best).prefix(40).map(\.0)) : (try? await Catalogue.list("jw", ["cinema": "1", "max": "\((Int(Jour.iso(.now).prefix(4)) ?? 2026) - 2)"])) ?? rails[d.id] ?? []
         default: return
         }
         await ImageBank.shared.prefetch(l.prefix(5).map { TMDB.img($0.poster, 342) })
         rails[d.id] = l
-        Task(priority: .utility) { await ImageBank.shared.prefetch(l.dropFirst(5).prefix(6).map { TMDB.img($0.poster, 342) }) }
+        Task(priority: .utility) { await ImageBank.shared.prefetch(l.dropFirst(5).map { TMDB.img($0.poster, 342) }) }
+    }
+    /// Films et séries proches de ceux que l’utilisateur a le mieux notés ; ce qui revient le plus souvent passe devant
+    static func conseils(_ s: Store) async -> [Film] {
+        var bases: [(Film, Double)] = s.rated.filter { $0.stars >= 3.5 }.prefix(12).map { ($0.film, $0.stars - 2.5) }
+        for f in s.likes.prefix(8) where !bases.contains(where: { $0.0.id == f.id }) && s.s.ratings[f.id] == nil { bases.append((f, 1)) }
+        guard !bases.isEmpty else { return [] }
+        let ecartes = Set(s.s.seen.map(\.id) + s.likes.map(\.id) + Array(s.s.ratings.keys))
+        var score: [Int: Double] = [:], film: [Int: Film] = [:]
+        for (b, poids) in bases {
+            for p in [1, 2] {
+                let l = (try? await TMDB.list(b.chemin + "/recommendations", [:], page: p, ttl: 3 * 86400)) ?? []
+                for (i, f) in l.enumerated() where !ecartes.contains(f.id) && f.poster != nil && !f.overview.isEmpty {
+                    score[f.id, default: 0] += poids * (1 - Double(i + (p - 1) * 20) / 60) * (0.5 + (f.note ?? 6) / 14)
+                    film[f.id] = f
+                }
+            }
+        }
+        // Un film mal noté fait reculer ce qui lui ressemble
+        for r in s.rated.suffix(4) where r.stars <= 2 {
+            for f in (try? await TMDB.list(r.film.chemin + "/recommendations", [:], ttl: 3 * 86400)) ?? [] { score[f.id]? -= 1 }
+        }
+        return score.sorted { $0.value > $1.value }.prefix(40).compactMap { film[$0.key] }
     }
     static func seed(_ s: Store) -> Film? { s.rated.first { $0.stars >= 4 }?.film ?? s.likes.first }
 }
@@ -152,13 +197,19 @@ struct Splash: View {
     }
 }
 
+enum Genre: String, CaseIterable { case tout = "Tout", films = "Films", series = "Séries" }
 struct HomeView: View {
+    @State private var genre = Genre.tout
+    @State private var remue = 0
     @Environment(Store.self) private var store
     private var acc = Accueil.shared
     @State private var current: Int?
     @State private var dice: Film?
     private func visible(_ r: RailDef) -> Bool {
         if store.s.hidden.contains(r.id) { return false }
+        if genre == .tout && r.serie && !RailDef.vitrine.contains(r.id) { return false }
+        if genre == .films && (r.serie || r.id == "ttrend") { return false }
+        if genre == .series && !r.serie && r.id != "foryou" { return false }
         switch r.kind {
         case .seances: return !store.upcoming.isEmpty
         case .likes: return !store.likes.isEmpty
@@ -166,21 +217,35 @@ struct HomeView: View {
         case .rated: return !store.s.ratings.isEmpty
         case .cinema: return !store.cinemas.isEmpty
         case .because: return Accueil.seed(store) != nil && acc.rails[r.id]?.isEmpty != true
-        case .query: return acc.rails[r.id]?.isEmpty != true
+        case .foryou: return acc.rails[r.id]?.isEmpty == false
+        case .query, .reissues: return acc.rails[r.id]?.isEmpty != true
+        }
+    }
+    private var une: [Film] {
+        switch genre {
+        case .tout: acc.hero
+        case .films: acc.hero.filter { !$0.tv }
+        case .series: acc.hero.filter(\.tv) + (acc.rails["ttrend"] ?? []).prefix(6).filter { f in !acc.hero.contains { $0.id == f.id } }
         }
     }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 30) {
                 if acc.failed && acc.hero.isEmpty { Note(text: "Connexion impossible. Vérifie Internet puis réessaie.", icon: "wifi.exclamationmark") { Task { await acc.start(store) } }.padding(.horizontal, 18).padding(.top, 110) }
-                else { HeroCarousel(films: acc.hero, current: $current) }
+                else {
+                    HeroCarousel(films: une, current: $current, remue: remue).id(genre)
+                        .overlay(alignment: .top) {
+                            GlassEffectContainer(spacing: 8) { HStack(spacing: 8) { ForEach(Genre.allCases, id: \.self) { g in Chip(text: g.rawValue, on: g == genre) { current = nil; genre = g } } } }.padding(.top, 108)
+                        }
+                }
                 LazyVStack(alignment: .leading, spacing: 30) {
-                    ForEach(RailDef.all(store).filter(visible)) { RailView(def: $0) }
+                    ForEach(RailDef.all(store).filter(visible)) { RailView(def: $0, genre: genre) }
                     Text("Ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB. Catalogue et streaming : JustWatch. Séances : AlloCiné.")
                         .font(.caption2).foregroundStyle(.tertiary).padding(.horizontal, 18).padding(.bottom, 30)
                 }
             }
         }
+        .onScrollPhaseChange { _, p in if p != .idle { remue += 1 } }
         .ignoresSafeArea(edges: .top).scrollEdgeEffectHidden(true, for: .top)
         .background { Ambient(path: (acc.hero.first { $0.id == current } ?? acc.hero.first).map { $0.back ?? $0.poster ?? "" }) }
         .toolbar {
@@ -191,7 +256,7 @@ struct HomeView: View {
         .navigationDestination(item: $dice) { FilmView(film: $0) }
         .refreshable { Haptic.tap(); await acc.start(store) }
         .onChange(of: store.s.services.map(\.id)) { Task { for d in RailDef.all(store) where d.id.hasPrefix("p") && acc.rails[d.id] == nil { await acc.load(d, store) } } }
-        .onChange(of: Accueil.seed(store)?.id) { Task { if let d = RailDef.all(store).first(where: { $0.id == "because" }) { await acc.load(d, store) } } }
+        .onChange(of: "\(store.s.ratings.count)|\(store.likes.count)|\(store.rated.first?.film.id ?? 0)") { Task { for d in RailDef.all(store) where d.id == "because" || d.id == "foryou" { await acc.load(d, store) } } }
     }
     private func roll() {
         let pool = (store.s.later.isEmpty ? acc.hero : store.s.later).filter { $0.id != dice?.id }
@@ -203,6 +268,9 @@ struct HomeView: View {
 struct HeroCarousel: View {
     let films: [Film]
     @Binding var current: Int?
+    var remue = 0
+    @State private var bande: Int?
+    @State private var tick = 0
     @Environment(\.accessibilityReduceMotion) private var calm
     @State private var touched = Date.distantPast
     var body: some View {
@@ -211,29 +279,37 @@ struct HeroCarousel: View {
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 0) {
                         ForEach(films) { f in
-                            HeroCard(film: f).containerRelativeFrame(.horizontal)
+                            HeroCard(film: f, bande: bande == f.id).containerRelativeFrame(.horizontal)
                                 .scrollTransition(.interactive, axis: .horizontal) { v, p in v.opacity(1 - abs(p.value) * 0.6).scaleEffect(1 - abs(p.value) * 0.06) }
                         }
                     }.scrollTargetLayout()
                 }
                 .frame(height: 590).scrollTargetBehavior(.paging).scrollIndicators(.hidden).scrollPosition(id: $current)
-                .onScrollPhaseChange { _, p in if p == .interacting { touched = .now; Haptic.soft() } }
+                .onScrollPhaseChange { _, p in if p == .interacting { touched = .now; bande = nil; tick += 1; Haptic.soft() } }
                 HStack(spacing: 6) {
                     ForEach(films) { f in Capsule().fill(.white.opacity(f.id == current ? 1 : 0.3)).frame(width: f.id == current ? 22 : 7, height: 7) }
                 }.animation(.bouncy, value: current).accessibilityHidden(true)
             }
         }
         .onChange(of: films.map(\.id), initial: true) { if !films.contains(where: { $0.id == current }) { current = films.first?.id } }
-        .task(id: current) {
-            guard !calm, films.count > 1 else { return }
-            try? await Task.sleep(for: .seconds(7))
-            guard !Task.isCancelled, Date.now.timeIntervalSince(touched) > 6, let i = films.firstIndex(where: { $0.id == current }) else { return }
+        .onChange(of: remue) { bande = nil; tick += 1 }
+        .onDisappear { bande = nil }
+        .task(id: "\(current ?? 0)|\(tick)") {
+            bande = nil
+            guard !calm, let f = films.first(where: { $0.id == current }) else { return }
+            try? await Task.sleep(for: .seconds(5))
+            if Task.isCancelled { return }
+            // Cinq secondes sans geste : la bande-annonce muette remplace l’image
+            if Accueil.shared.details[f.id]?.trailer != nil, !ProcessInfo.processInfo.isLowPowerModeEnabled { bande = f.id; try? await Task.sleep(for: .seconds(32)) } else { try? await Task.sleep(for: .seconds(2)) }
+            guard !Task.isCancelled, films.count > 1, let i = films.firstIndex(where: { $0.id == current }) else { return }
+            bande = nil
             withAnimation(.smooth(duration: 0.9)) { current = films[(i + 1) % films.count].id }
         }
     }
 }
 struct HeroCard: View {
     let film: Film
+    var bande = false
     @Environment(Store.self) private var store
     @State private var tried = false
     private var d: FilmDetail? { Accueil.shared.details[film.id] }
@@ -241,13 +317,14 @@ struct HeroCard: View {
     var body: some View {
         let art = Visuel(film, d)
         ZStack(alignment: .bottom) {
-            Color.clear.overlay { if ready { Pic(url: TMDB.img(art.path, 780)) { Blank(title: "") }.phaseAnimator([1.0, 1.07]) { v, p in v.scaleEffect(p) } animation: { _ in .easeInOut(duration: 9) } } }.clipped()
+            Color.clear.overlay { if ready { Pic(url: TMDB.img(art.path, 780)) { Blank(title: "") }.phaseAnimator([1.0, 1.07]) { v, p in v.scaleEffect(p) } animation: { _ in .easeInOut(duration: 9) } } }
+                .overlay { if bande, let k = d?.trailer { Bande(key: k) } }.clipped()
                 .mask { LinearGradient(stops: [.init(color: .black, location: 0.5), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom) }
             VStack(spacing: 14) {
                 if Affiche.shared.reissue(film) { Ressortie() }
                 if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Color.clear }.frame(maxWidth: 280, maxHeight: 100) }
                 else if ready && !art.titled { Text(film.title).font(.system(size: 34, weight: .heavy, design: .rounded)).multilineTextAlignment(.center).lineLimit(3).minimumScaleFactor(0.6).shadow(radius: 12) }
-                Text([d?.genres.prefix(2).joined(separator: ", "), d?.runtime.map(Jour.duree), film.note.map { "★ " + $0.fr }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ·  ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85))
+                Text([d?.genres.prefix(2).joined(separator: ", "), d?.runtime.map(Jour.duree), d.flatMap { $0.saisons.isEmpty ? nil : "\($0.saisons.count) saison\($0.saisons.count > 1 ? "s" : "")" }, film.sur5.map { "★ " + $0 }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ·  ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85))
                 GlassEffectContainer(spacing: 10) {
                     HStack(spacing: 10) {
                         if Affiche.shared.has(film) {
@@ -268,11 +345,12 @@ struct HeroCard: View {
 }
 
 struct RailView: View {
-    let def: RailDef
+    let def: RailDef, genre: Genre
     @Environment(Store.self) private var store
     private var acc = Accueil.shared
-    init(def: RailDef) { self.def = def }
-    private var shown: [Film]? {
+    init(def: RailDef, genre: Genre = .tout) { self.def = def; self.genre = genre }
+    private var shown: [Film]? { genre == .tout ? brut : brut?.filter { $0.tv == (genre == .series) } }
+    private var brut: [Film]? {
         switch def.kind {
         case .likes: store.likes
         case .later: store.s.later
@@ -285,7 +363,8 @@ struct RailView: View {
         switch def.kind {
         case .query(let p, let q): .grid(GridQuery(title: def.title, path: p, params: q))
         case .likes, .later, .rated: .grid(GridQuery(title: def.title, path: "", films: shown))
-        case .because: Accueil.seed(store).map { .grid(GridQuery(title: title, path: "/movie/\($0.id)/recommendations")) }
+        case .because: Accueil.seed(store).map { .grid(GridQuery(title: title, path: $0.chemin + "/recommendations")) }
+        case .foryou, .reissues: .grid(GridQuery(title: def.title, path: "", films: shown))
         default: nil
         }
     }
@@ -298,11 +377,18 @@ struct RailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 RailHead(title: title, icon: def.icon, more: more, logo: def.logo)
                 Group {
-                    if let shown { if def.id == "trend" { top10(shown) } else { RailScroll { ForEach(shown) { FilmTile(film: $0, source: "\(def.id)-\($0.id)", incine: incine).railFade() } } } }
+                    if let shown { if def.id == "trend" { top10(shown) } else { RailScroll { ForEach(shown) { FilmTile(film: $0, source: "\(def.id)-\($0.id)", caption: lieu($0), incine: incine).railFade() } } } }
                     else { GhostRail() }
                 }.frame(height: 250, alignment: .top)
             }
+            // Tout le rayon est prêt en mémoire avant d’être parcouru
+            .task(id: shown?.count) { await ImageBank.shared.prefetch((shown ?? []).map { TMDB.img($0.poster, 342) }) }
         }
+    }
+    /// Ressorties : la ville la plus proche et sa prochaine date
+    private func lieu(_ f: Film) -> String? {
+        guard def.kind == .reissues, let r = Registre.shared.films[f.id], let v = Salles.proche(r.lieux, Position.shared.best) else { return nil }
+        return [v.0.base, v.0.dates.first.map { Jour.jolie($0) }].compactMap { $0 }.joined(separator: " · ")
     }
     /// Classement façon télévision : grand chiffre derrière l’affiche
     private func top10(_ l: [Film]) -> some View {

@@ -67,7 +67,7 @@ enum TMDB {
             switch (res.1 as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200: break
             case 401: throw Oops("Clé TMDB refusée")
-            case 404: throw Oops("Film introuvable")
+            case 404: throw Oops("Fiche introuvable")
             case let s: throw Oops("TMDB a répondu avec l’erreur \(s)")
             }
             guard let j = decode(res.0) else { throw Oops("Réponse TMDB illisible") }
@@ -76,8 +76,10 @@ enum TMDB {
         } catch { if let old, let j = decode(old.data) { return j }; throw error }
     }
     static func film(_ j: J) -> Film? {
-        guard let id = j["id"] as? Int, let t = j["title"] as? String else { return nil }
-        return Film(id: id, title: t, release: j["release_date"] as? String ?? "", poster: j["poster_path"] as? String, back: j["backdrop_path"] as? String,
+        let media = j["media_type"] as? String
+        guard media != "person", let id = j["id"] as? Int, let t = (j["title"] ?? j["name"]) as? String else { return nil }
+        let tv = media == "tv" || (media == nil && j["title"] == nil)
+        return Film(id: tv ? -id : id, title: t, release: (tv ? j["first_air_date"] : j["release_date"]) as? String ?? "", poster: j["poster_path"] as? String, back: j["backdrop_path"] as? String,
                     note: (j["vote_count"] as? Int ?? 0) > 20 ? j["vote_average"] as? Double : nil, overview: j["overview"] as? String ?? "")
     }
     static func list(_ path: String, _ params: [String: String] = [:], page: Int = 1, ttl: Double = 43200) async throws -> [Film] {
@@ -86,8 +88,8 @@ enum TMDB {
         return ((j["results"] as? [J]) ?? []).compactMap(film).filter { seen.insert($0.id).inserted }
     }
     static func search(_ q: String) async throws -> [Film] {
-        async let a = list("/search/movie", ["query": q, "include_adult": "false"], page: 1, ttl: 86400)
-        async let b = list("/search/movie", ["query": q, "include_adult": "false"], page: 2, ttl: 86400)
+        async let a = list("/search/multi", ["query": q, "include_adult": "false"], page: 1, ttl: 86400)
+        async let b = list("/search/multi", ["query": q, "include_adult": "false"], page: 2, ttl: 86400)
         var seen = Set<Int>()
         let l = (try await a + b).filter { seen.insert($0.id).inserted }
         return l.filter { $0.poster != nil } + l.filter { $0.poster == nil }
@@ -100,10 +102,11 @@ enum TMDB {
         }
     }
     static func detail(_ id: Int) async throws -> FilmDetail {
-        let j = try await get("/movie/\(id)", ["append_to_response": "credits,videos,watch/providers,recommendations,images", "include_video_language": "fr,en", "include_image_language": "fr,en,null"], ttl: 3 * 86400)
-        guard let f = film(j) else { throw Oops("Film introuvable") }
+        let tv = id < 0
+        let j = try await get((tv ? "/tv/" : "/movie/") + String(abs(id)), ["append_to_response": "credits,videos,watch/providers,recommendations,images", "include_video_language": "fr,en", "include_image_language": "fr,en,null"], ttl: 3 * 86400)
+        guard let f = film(j) else { throw Oops("Fiche introuvable") }
         var d = FilmDetail(film: f)
-        let ot = j["original_title"] as? String ?? ""
+        let ot = (j["original_title"] ?? j["original_name"]) as? String ?? ""
         d.original = ot == f.title ? "" : ot
         d.runtime = (j["runtime"] as? Int).flatMap { $0 > 0 ? $0 : nil }
         d.tagline = j["tagline"] as? String ?? ""
@@ -112,6 +115,16 @@ enum TMDB {
         let cr = j["credits"] as? J
         func people(_ l: [J], _ role: String) -> [Person] { l.compactMap { x in (x["id"] as? Int).map { Person(id: $0, name: x["name"] as? String ?? "", role: x[role] as? String ?? "", photo: x["profile_path"] as? String) } } }
         d.directors = people(((cr?["crew"] as? [J]) ?? []).filter { $0["job"] as? String == "Director" }, "job")
+        if tv {
+            d.directors = people((j["created_by"] as? [J]) ?? [], "job").map { var p = $0; p.role = "Création"; return p }
+            d.runtime = (j["episode_run_time"] as? [Int])?.first ?? (j["last_episode_to_air"] as? J)?["runtime"] as? Int
+            d.saisons = ((j["seasons"] as? [J]) ?? []).compactMap { s in
+                guard let n = s["season_number"] as? Int, n > 0, let k = s["episode_count"] as? Int, k > 0 else { return nil }
+                return Saison(id: n, nom: s["name"] as? String ?? "Saison \(n)", nb: k, date: s["air_date"] as? String ?? "")
+            }
+            d.prochain = (j["next_episode_to_air"] as? J)?["air_date"] as? String
+            d.fini = ["Ended", "Canceled"].contains(j["status"] as? String ?? "")
+        }
         d.cast = people(Array(((cr?["cast"] as? [J]) ?? []).prefix(20)), "character")
         func score(_ v: J) -> Int { (v["iso_639_1"] as? String == "fr" ? 8 : 0) + (v["type"] as? String == "Trailer" ? 4 : 0) + (v["official"] as? Bool == true ? 2 : 0) }
         d.trailer = (((j["videos"] as? J)?["results"] as? [J]) ?? []).filter {
@@ -133,6 +146,13 @@ enum TMDB {
         }
         d.similar = (((j["recommendations"] as? J)?["results"] as? [J]) ?? []).compactMap(film)
         return d
+    }
+    static func saison(_ id: Int, _ n: Int) async throws -> [Episode] {
+        let j = try await get("/tv/\(abs(id))/season/\(n)", ttl: 86400)
+        return ((j["episodes"] as? [J]) ?? []).compactMap { e in
+            guard let i = e["id"] as? Int, let k = e["episode_number"] as? Int else { return nil }
+            return Episode(id: i, n: k, titre: e["name"] as? String ?? "Épisode \(k)", texte: e["overview"] as? String ?? "", date: e["air_date"] as? String ?? "", min: e["runtime"] as? Int, image: e["still_path"] as? String)
+        }
     }
     static func provider(_ x: J) -> Provider? { (x["provider_id"] as? Int).map { Provider(id: $0, name: x["provider_name"] as? String ?? "", logo: x["logo_path"] as? String) } }
     static func providers() async throws -> [Provider] {
@@ -198,6 +218,11 @@ actor AlloCine {
         return (day <= fin ? 24 : (1...3).contains(dow) ? 6 : 14) * 3600
     }
     private func page(_ id: String, _ day: String, _ n: Int) async throws -> J {
+        let j = try await fetch("showtimes/theater-\(id)/d-\(day)/p-\(n)/")
+        guard j["results"] is [Any] else { throw Oops("Le format d’AlloCiné a changé") }
+        return j
+    }
+    func fetch(_ path: String) async throws -> J {
         // Une demande à la fois : le créneau est réservé avant d’attendre (les acteurs sont réentrants)
         let now = Date.now
         if pause > now { throw Oops("AlloCiné demande une pause, réessaie dans un quart d’heure", quota: true) }
@@ -209,7 +234,7 @@ actor AlloCine {
         last = slot; recent.append(slot); UserDefaults.standard.set(today + 1, forKey: k)
         if slot > now { try await Task.sleep(for: .seconds(slot.timeIntervalSince(now))) }
         if pause > .now { throw Oops("AlloCiné demande une pause, réessaie dans un quart d’heure", quota: true) }
-        var r = URLRequest(url: URL(string: "https://www.allocine.fr/_/showtimes/theater-\(id)/d-\(day)/p-\(n)/")!, timeoutInterval: 14)
+        var r = URLRequest(url: URL(string: "https://www.allocine.fr/_/\(path)")!, timeoutInterval: 14)
         r.setValue("application/json", forHTTPHeaderField: "Accept")
         r.setValue("mon-cine-perso/1.0", forHTTPHeaderField: "User-Agent")
         let res: (Data, URLResponse)
@@ -220,7 +245,7 @@ actor AlloCine {
         case 404: throw Oops("Cinéma introuvable")
         case let s: throw Oops("AlloCiné a répondu avec l’erreur \(s)")
         }
-        guard let j = (try? JSONSerialization.jsonObject(with: res.0)) as? J, j["results"] is [Any] else { throw Oops("Le format d’AlloCiné a changé") }
+        guard let j = (try? JSONSerialization.jsonObject(with: res.0)) as? J else { throw Oops("Le format d’AlloCiné a changé") }
         return j
     }
     private func load(_ id: String, _ day: String) async throws -> Programme {

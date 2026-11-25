@@ -43,6 +43,7 @@ jobs:
           shot() { n=$1; shift; xcrun simctl launch --terminate-running-process "$UDID" fr.cyprdu.moncine -demo "$@"; sleep 9; xcrun simctl io "$UDID" screenshot "shots/$n.png"; sips -Z 1000 "shots/$n.png" >/dev/null; }
           for t in home cine mine tickets search; do shot $t -tab $t; done
           shot film -tab home -film YES
+          shot serie -tab home -serie YES
           xcrun simctl launch --terminate-running-process "$UDID" fr.cyprdu.moncine; sleep 5; xcrun simctl io "$UDID" screenshot shots/welcome.png; sips -Z 1000 shots/welcome.png >/dev/null
           exit $R
       - uses: actions/upload-artifact@v4

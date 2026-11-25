@@ -7,3 +7,4 @@ Payload/
 shots/
 *.pdf
 .dev.vars
+Serveur/.wrangler/

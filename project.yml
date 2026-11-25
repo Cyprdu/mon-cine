@@ -32,6 +32,8 @@ targets:
         NSCameraUsageDescription: Pour scanner le QR code de tes billets et cartes de cinéma.
         NSLocationWhenInUseUsageDescription: Pour trier les cinémas du plus proche au plus loin. Ta position reste sur l’iPhone.
         NSFaceIDUsageDescription: Pour protéger tes billets et cartes prépayées.
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [fr.cyprdu.moncine.veille]
         LSSupportsOpeningDocumentsInPlace: false
         CFBundleDocumentTypes:
           - CFBundleTypeName: Billet de cinéma

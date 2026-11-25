@@ -3,17 +3,17 @@ import UniformTypeIdentifiers
 
 // MARK: Ma liste
 struct LibraryView: View {
-    enum Part: String, CaseIterable { case likes = "J’aime", later = "À voir", rated = "Notés", seen = "Vus", agenda = "Séances" }
+    enum Part: String, CaseIterable { case likes = "J’aime", later = "À voir", rated = "Notés", seen = "Vus", alertes = "Alertes", agenda = "Séances" }
     @Environment(Store.self) private var store
     @State private var part = Part.likes
     private var films: [Film] {
-        switch part { case .likes: store.likes; case .later: store.s.later; case .rated: store.rated.map(\.film); case .seen: store.s.seen; case .agenda: [] }
+        switch part { case .likes: store.likes; case .later: store.s.later; case .rated: store.rated.map(\.film); case .seen: store.s.seen; case .alertes: store.s.alertes; case .agenda: [] }
     }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 10) {
-                    stat("\(store.s.seen.count)", "films vus", "eye.fill"); stat("\(store.likes.count)", "coups de cœur", "heart.fill")
+                    stat("\(store.s.seen.count)", "vus", "eye.fill"); stat("\(store.likes.count)", "coups de cœur", "heart.fill")
                     stat(store.rated.isEmpty ? "–" : (store.rated.reduce(0) { $0 + $1.stars } / Double(store.rated.count)).fr, "note moyenne", "star.fill")
                 }.padding(.horizontal, 18)
                 ScrollView(.horizontal) { HStack(spacing: 8) { ForEach(Part.allCases, id: \.self) { p in Chip(text: p.rawValue, on: p == part) { part = p } } }.padding(.horizontal, 18) }.scrollIndicators(.hidden).scrollClipDisabled()
@@ -39,7 +39,7 @@ struct LibraryView: View {
                         }
                     }.padding(.horizontal, 18)
                 } else {
-                    if films.isEmpty { empty(part == .likes ? "Touche le cœur d’un film pour le retrouver ici" : part == .later ? "Garde ici les films à voir" : "Les films vus apparaîtront ici") }
+                    if films.isEmpty { empty(part == .likes ? "Touche le cœur d’un film pour le retrouver ici" : part == .later ? "Garde ici les films à voir" : part == .alertes ? "Touche la cloche d’un film ancien pour être prévenu de sa ressortie" : "Les films vus apparaîtront ici") }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 12)], spacing: 18) { ForEach(films) { FilmTile(film: $0, source: "l-\(part.rawValue)-\($0.id)", width: nil).transition(.scale.combined(with: .opacity)) } }.padding(.horizontal, 18)
                 }
             }.padding(.vertical, 12)
@@ -55,7 +55,7 @@ struct LibraryView: View {
 
 // MARK: Recherche
 struct SearchView: View {
-    enum Scope: String, CaseIterable { case all = "Tout", films = "Films", people = "Personnes", cinemas = "Cinémas" }
+    enum Scope: String, CaseIterable { case all = "Tout", films = "Films", series = "Séries", people = "Personnes", cinemas = "Cinémas" }
     @Environment(Store.self) private var store
     @Environment(Position.self) private var pos
     @AppStorage("recherches") private var saved = ""
@@ -74,7 +74,7 @@ struct SearchView: View {
         ScrollView { if text.count < 2 { browse } else { results } }
             .background(Color.fond.ignoresSafeArea()).navigationTitle("Recherche").scrollEdgeEffectStyle(.hard, for: .top)
             .scrollDismissesKeyboard(.immediately)
-            .searchable(text: $q, prompt: "Films, acteurs, cinémas").autocorrectionDisabled()
+            .searchable(text: $q, prompt: "Films, séries, acteurs, cinémas").autocorrectionDisabled()
             .onSubmit(of: .search) { keep() }
             .task(id: q) { await search() }
     }
@@ -100,7 +100,7 @@ struct SearchView: View {
                 Text("Parcourir").font(.title3.bold()).padding(.horizontal, 18)
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 12) {
                     ForEach(genres, id: \.0) { g in
-                        NavigationLink(value: Route.grid(GridQuery(title: g.1, path: "jw", params: ["genres": g.0, "mix": "1"]))) {
+                        NavigationLink(value: Route.grid(GridQuery(title: g.1, path: "jw", params: ["genres": g.0, "mix": "1", "type": "all"]))) {
                             Color.white.opacity(0.07).frame(height: 96)
                                 .overlay { if let b = art[g.0] { Pic(url: TMDB.img(b, 300)) { Color.clear } } }
                                 .overlay { LinearGradient(colors: [.black.opacity(0.15), .black.opacity(0.75)], startPoint: .top, endPoint: .bottom) }
@@ -131,7 +131,7 @@ struct SearchView: View {
                     if scope == .all { RailScroll(spacing: 14) { ForEach(people.prefix(8)) { p in link(.person(p)) { VStack(spacing: 6) { face(p, 72); Text(p.name).font(.caption).lineLimit(2, reservesSpace: true).multilineTextAlignment(.center) }.frame(width: 84) } } }.padding(.bottom, 8) }
                     else { ForEach(people) { p in link(.person(p)) { HStack(spacing: 14) { face(p, 56); Text(p.name).font(.headline); Spacer(); Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }.padding(.horizontal, 18).padding(.vertical, 6).contentShape(.rect) } } }
                 }
-                if scope == .all || scope == .films { section("Films", films.count); ForEach(films) { f in link(.film(f, "s-\(f.id)")) { FilmRow(film: f, source: "s-\(f.id)") }; Divider().padding(.leading, 88) } }
+                if scope == .all || scope == .films || scope == .series { let l = scope == .all ? films : films.filter { $0.tv == (scope == .series) }; section("Films et séries", l.count); ForEach(l) { f in link(.film(f, "s-\(f.id)")) { FilmRow(film: f, source: "s-\(f.id)") }; Divider().padding(.leading, 88) } }
             }
         }.padding(.vertical, 12)
     }
@@ -165,7 +165,7 @@ struct FilmRow: View {
             Poster(path: film.poster, title: film.title, width: 56, size: 185).modifier(ZoomSource(id: source))
             VStack(alignment: .leading, spacing: 4) {
                 Text(film.title).font(.headline).lineLimit(2).multilineTextAlignment(.leading)
-                Text([film.year, film.note.map { "★ " + $0.fr }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                Text([film.tv ? "Série" : nil, film.year, film.sur5.map { "★ " + $0 }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
                 if Affiche.shared.reissue(film) { Ressortie() } else if Affiche.shared.has(film) { Label("Au cinéma", systemImage: "popcorn.fill").font(.caption.weight(.semibold)).foregroundStyle(Color.or) }
             }
             Spacer(minLength: 0)
@@ -202,13 +202,18 @@ struct SettingsView: View {
     @State private var exportFile: BackupFile?
     @State private var exporting = false
     @State private var restore: Backup?
+    @AppStorage("serveur") private var serveur = ""
     var body: some View {
         @Bindable var store = store
         Form {
             Section("Films (TMDB)") {
                 if store.hasKey { LabeledContent("Clé", value: "Enregistrée"); Button("Retirer la clé", role: .destructive) { Trousseau.write(nil); store.hasKey = false } } else { KeyField() }
             }
-            Section("Cinémas") { Button("Gérer mes cinémas (\(store.cinemas.count))") { cinemas = true } }
+            Section("Cinémas") {
+                Button("Gérer mes cinémas (\(store.cinemas.count))") { cinemas = true }
+                NavigationLink("Alertes de ressortie") { ZoneView() }
+            }
+            Section { TextField("Adresse du serveur", text: $serveur).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).onSubmit { Task { await Registre.shared.load(fresh: true) } } } header: { Text("Base des ressorties") } footer: { Text(Registre.shared.ready ? "Connectée : \(Registre.shared.films.count) films suivis." : Registre.base == nil ? "Aucun serveur : les ressorties sont lues film par film." : "Base injoignable pour l’instant.") }
             Section { Toggle("Protéger les billets par Face ID", isOn: $store.s.lock) } header: { Text("Billets") } footer: { Text("Les billets restent uniquement sur cet iPhone, dans le dossier protégé de l’app.") }
             Section("Mes plateformes") { ServicePicker().padding(.vertical, 8) }
             Section { NavigationLink("Ordre et affichage des catégories") { RailOrder() } } header: { Text("Accueil") }

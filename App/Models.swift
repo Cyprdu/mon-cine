@@ -1,6 +1,7 @@
 import SwiftUI
 
 // MARK: Films
+/// Les séries portent un identifiant TMDB négatif : jamais confondues avec un film de même numéro
 struct Film: Codable, Hashable, Identifiable {
     var id: Int
     var title: String
@@ -11,7 +12,14 @@ struct Film: Codable, Hashable, Identifiable {
     var overview: String = ""
     var year: String { String(release.prefix(4)) }
     var upcoming: Bool { release > Jour.iso(.now) }
+    var tv: Bool { id < 0 }
+    var chemin: String { (tv ? "/tv/" : "/movie/") + String(abs(id)) }
+    var web: URL { URL(string: "https://www.themoviedb.org\(chemin)?language=fr-FR")! }
+    /// Note du public ramenée sur 5, comme celle de l’utilisateur
+    var sur5: String? { note.flatMap { $0 > 0 ? ($0 / 2).fr : nil } }
 }
+struct Saison: Hashable, Identifiable { var id: Int, nom: String, nb: Int, date: String }
+struct Episode: Hashable, Identifiable { var id: Int, n: Int, titre: String, texte: String, date: String, min: Int?, image: String? }
 struct Person: Codable, Hashable, Identifiable { var id: Int; var name: String; var role: String; var photo: String? }
 struct Provider: Codable, Hashable, Identifiable { var id: Int; var name: String; var logo: String? }
 struct FilmDetail {
@@ -21,6 +29,7 @@ struct FilmDetail {
     var stream: [Provider] = [], free: [Provider] = [], rent: [Provider] = [], buy: [Provider] = [], watchLink: URL?
     var similar: [Film] = []
     var cleanPoster: String?, cleanBack: String?
+    var saisons: [Saison] = [], prochain: String?, fini = false
 }
 /// Grande image sans texte ; à défaut l’affiche, qui porte déjà le titre
 struct Visuel {

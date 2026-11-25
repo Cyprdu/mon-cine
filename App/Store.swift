@@ -6,6 +6,7 @@ struct Saved: Codable {
     var cinemas: [Cinema] = [], agenda: [AgendaItem] = []
     var services: [Provider] = []
     var order: [String] = [], hidden: Set<String> = []
+    var alertes: [Film] = [], prevenus: Set<String> = [], episodes: Set<String> = [], zone = Zone()
     var onboarded = false, lock = false, picked = false
     init() {}
     init(from d: Decoder) throws {   // un champ absent (ancienne sauvegarde) garde sa valeur par défaut
@@ -21,6 +22,10 @@ struct Saved: Codable {
         hidden = try c.decodeIfPresent(Set<String>.self, forKey: .hidden) ?? []
         onboarded = try c.decodeIfPresent(Bool.self, forKey: .onboarded) ?? false
         picked = try c.decodeIfPresent(Bool.self, forKey: .picked) ?? false
+        alertes = try c.decodeIfPresent([Film].self, forKey: .alertes) ?? []
+        prevenus = try c.decodeIfPresent(Set<String>.self, forKey: .prevenus) ?? []
+        episodes = try c.decodeIfPresent(Set<String>.self, forKey: .episodes) ?? []
+        zone = try c.decodeIfPresent(Zone.self, forKey: .zone) ?? Zone()
         lock = try c.decodeIfPresent(Bool.self, forKey: .lock) ?? false
     }
 }
