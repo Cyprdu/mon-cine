@@ -24,18 +24,17 @@ struct FilmView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 24) {
                     header
                     actions(proxy)
                     if let err { Note(text: err) { Task { await load() } }.padding(.horizontal, 18) }
-                    if let t = d?.tagline, !t.isEmpty { Text(t).font(.title3.weight(.semibold)).italic().padding(.horizontal, 18) }
+                    if let t = d?.tagline, !t.isEmpty { Text(t).font(.headline).foregroundStyle(.white.opacity(0.75)).padding(.horizontal, 18) }
                     if !f.overview.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(f.overview).lineSpacing(4).lineLimit(more ? nil : 4).foregroundStyle(.white.opacity(0.88))
                             if f.overview.count > 180 { Button(more ? "Réduire" : "Lire la suite") { Haptic.tap(); withAnimation(.snappy) { more.toggle() } }.font(.subheadline.weight(.semibold)) }
                         }.padding(.horizontal, 18)
                     }
-                    watch
                     VStack(alignment: .leading, spacing: 14) {
                         RailHead(title: "Au cinéma", icon: "popcorn.fill")
                         if inCine || showSeances { FilmSeances(film: f, original: d?.original ?? "") } else {
@@ -58,13 +57,15 @@ struct FilmView: View {
                     }
                 }.padding(.bottom, 40)
             }
-            .ignoresSafeArea(edges: .top)
+            .ignoresSafeArea(edges: .top).scrollEdgeEffectHidden(!past, for: .top)
+            .background(Color.fond)
             .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 320 } action: { _, y in past = y }
         }
-        .background { Ambient(path: f.back ?? f.poster) }
+        .background { Color.fond.ignoresSafeArea() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).opacity(past ? 1 : 0).animation(.easeOut, value: past) }
+            ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).frame(maxWidth: 170).opacity(past ? 1 : 0).animation(.easeOut, value: past) }
+            if d?.trailer != nil { ToolbarItem(placement: .topBarTrailing) { Button("Bande-annonce", systemImage: "movieclapper.fill") { Haptic.tap(); trailer = true } } }
             ToolbarItem(placement: .topBarTrailing) { ShareLink(item: URL(string: "https://www.themoviedb.org/movie/\(f.id)?language=fr-FR")!, subject: Text(f.title)) }
         }
         .sheet(isPresented: $trailer) { if let k = d?.trailer { TrailerSheet(key: k, title: f.title) } }
@@ -74,38 +75,34 @@ struct FilmView: View {
     private func load() async {
         do { let x = try await TMDB.detail(film.id); withAnimation { d = x; err = nil } } catch is CancellationError {} catch { err = error.localizedDescription }
     }
+    /// Une seule grande image sans texte, le logo du film dessus
     private var header: some View {
-        ZStack(alignment: .bottomLeading) {
-            Color.clear.overlay { ZStack { Pic(url: TMDB.img(film.poster, 342)) { Color.clear }.blur(radius: 24); Pic(url: TMDB.img(f.back ?? f.poster, 1280)) { Blank(title: "") } } }
-                .clipped()
-                .mask { LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom) }
-                .visualEffect { v, g in
-                    let y = max(0, g.frame(in: .scrollView).minY), h = max(1, g.size.height)
-                    return v.scaleEffect(1 + y / h, anchor: .bottom)
+        let art = Visuel(f, d), ready = d != nil || err != nil
+        return ZStack(alignment: .bottom) {
+            Color.clear
+                .overlay(alignment: .top) { if ready { Pic(url: TMDB.img(art.path, 780)) { Blank(title: "") } } }
+                .frame(height: 540).clipped()
+                .overlay { LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .clear, location: 0.2), .init(color: .clear, location: 0.45), .init(color: .fond.opacity(0.9), location: 0.92), .init(color: .fond, location: 1)], startPoint: .top, endPoint: .bottom) }
+                .accessibilityHidden(true)
+            VStack(spacing: 10) {
+                if reissue { Ressortie() }
+                if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Text(f.title).font(.largeTitle.bold()) }.frame(maxWidth: 290, maxHeight: 110).shadow(color: .black.opacity(0.5), radius: 10).accessibilityElement().accessibilityLabel(f.title).accessibilityAddTraits(.isHeader) }
+                else if ready { Text(f.title).font(.system(size: 34, weight: .heavy, design: .rounded)).multilineTextAlignment(.center).minimumScaleFactor(0.6).lineLimit(3).shadow(color: .black.opacity(0.6), radius: 10).accessibilityAddTraits(.isHeader) }
+                Text([f.upcoming ? "Sortie le " + Jour.jolie(f.release) : f.year, d?.runtime.map(Jour.duree), d?.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
+                HStack(spacing: 8) {
+                    if let n = f.note, n > 0 { Badge(text: n.fr + " / 10", icon: "person.3.fill") }
+                    if let r = store.s.ratings[f.id] { Badge(text: r.stars.fr + " / 5", icon: "star.fill", tint: .or) }
                 }
-            HStack(alignment: .bottom, spacing: 16) {
-                Poster(path: f.poster, title: f.title, width: 118, size: 500).shadow(color: .black.opacity(0.6), radius: 18, y: 10)
-                VStack(alignment: .leading, spacing: 8) {
-                    if reissue { Ressortie() }
-                    if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Color.clear }.frame(maxWidth: 210, maxHeight: 80, alignment: .leading).accessibilityLabel(f.title) }
-                    else { Text(f.title).font(.system(.title, design: .rounded, weight: .heavy)).minimumScaleFactor(0.7).lineLimit(4) }
-                    Text([f.upcoming ? "Sortie le " + Jour.jolie(f.release) : f.year, d?.runtime.map(Jour.duree)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline.weight(.semibold))
-                    if let g = d?.genres, !g.isEmpty { Text(g.prefix(3).joined(separator: ", ")).font(.footnote).foregroundStyle(.secondary) }
-                    HStack(spacing: 8) {
-                        if let n = f.note, n > 0 { Badge(text: n.fr + " / 10", icon: "person.3.fill") }
-                        if let r = store.s.ratings[f.id] { Badge(text: r.stars.fr + " / 5", icon: "star.fill", tint: .or) }
-                    }
-                }
-            }.padding(.horizontal, 18)
-        }.frame(height: 480)
+            }.padding(.horizontal, 24).frame(maxWidth: .infinity)
+        }.frame(height: 540)
     }
     private func actions(_ proxy: ScrollViewProxy) -> some View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
                 if inCine { Button { Haptic.tap(); withAnimation(.snappy) { proxy.scrollTo("seances", anchor: .top) } } label: { Label("Séances", systemImage: "ticket.fill").font(.headline).frame(maxWidth: .infinity).frame(height: 34).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.or) }
-                if !inCine || offers.flatMap({ store.direct($0) }) != nil { PlayButton(film: film, offers: offers, known: true) }
-                if d?.trailer != nil { Button { Haptic.tap(); trailer = true } label: { Label("Bande-annonce", systemImage: "film").labelStyle(.titleOnly).font(.headline).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity).frame(height: 34) }.buttonStyle(.glass) }
+                if watchable { PlayButton(film: film, offers: offers, known: true) }
             }
+            if !inCine && !watchable && loaded { Text(f.upcoming ? "Pas encore sorti" : "Pas disponible en streaming en France pour l’instant").font(.subheadline).foregroundStyle(.secondary) }
             GlassEffectContainer(spacing: 14) {
                 HStack(spacing: 0) {
                     labelled("J’aime") { HeartButton(film: f, big: true) }
@@ -123,19 +120,12 @@ struct FilmView: View {
                 .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel(t)
         }
     }
-    // MARK: Streaming
-    @ViewBuilder private var watch: some View {
-        if let offers, offers.contains(where: { $0.kind != "CINEMA" }) {
-            VStack(alignment: .leading, spacing: 14) {
-                RailHead(title: "Où regarder", icon: "play.rectangle.fill")
-                OfferList(offers: offers).padding(.horizontal, 18)
-                Text("Disponibilités en France : JustWatch.").font(.caption2).foregroundStyle(.tertiary).padding(.horizontal, 18)
-            }
-        } else if offers != nil || err != nil, let d, !(d.stream + d.free + d.rent + d.buy).isEmpty {
-            VStack(alignment: .leading, spacing: 14) { RailHead(title: "Où regarder", icon: "play.rectangle.fill"); ProviderList(film: film, d: d).padding(.horizontal, 18) }
-        } else if offers != nil, !inCine, !f.upcoming {
-            Text("Pas disponible en streaming en France pour l’instant.").font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 18)
-        }
+    private var loaded: Bool { offers != nil && (d != nil || err != nil) }
+    /// Au moins une offre hors cinéma ; avant la réponse, seulement pour un film qui n’est pas en salle
+    private var watchable: Bool {
+        if let o = offers, o.contains(where: { $0.kind != "CINEMA" }) { return true }
+        if let d, !(d.stream + d.free + d.rent + d.buy).isEmpty { return true }
+        return !loaded && !inCine && !f.upcoming
     }
     private func face(_ p: Person) -> some View {
         NavigationLink(value: Route.person(p)) {

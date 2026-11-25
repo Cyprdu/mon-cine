@@ -189,7 +189,6 @@ struct PlayButton: View {
     @State private var sheet: Offres?
     struct Offres: Identifiable { let id = UUID(); let list: [Offer] }
     var body: some View {
-        let mine = offers.flatMap { store.direct($0) }
         Button {
             Task {
                 busy = true; defer { busy = false }
@@ -200,7 +199,7 @@ struct PlayButton: View {
         } label: {
             HStack(spacing: 8) {
                 if busy { ProgressView().tint(.black) } else { Image(systemName: "play.fill") }
-                Text(mine.map { "Regarder sur " + $0.provider.name.replacingOccurrences(of: "Amazon ", with: "") } ?? "Regarder").lineLimit(1).minimumScaleFactor(0.7)
+                Text("Regarder")
             }.font(.headline).frame(maxWidth: known ? .infinity : nil).frame(height: 34).padding(.horizontal, known ? 0 : 12).foregroundStyle(.black)
         }
         .buttonStyle(.glassProminent).tint(.white).disabled(busy)

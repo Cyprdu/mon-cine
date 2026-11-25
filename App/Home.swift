@@ -97,6 +97,7 @@ struct RailDef: Identifiable, Hashable {
     var hero: [Film] = []
     var rails: [String: [Film]] = [:]
     var titles: [String: String] = [:]
+    var details: [Int: FilmDetail] = [:]
     var failed = false
     var ready = false
     @ObservationIgnored private var running = false
@@ -108,7 +109,14 @@ struct RailDef: Identifiable, Hashable {
         var h: [Film] = []
         for f in cine.prefix(5) + soft.prefix(4) where !h.contains(where: { $0.id == f.id }) { h.append(f) }
         failed = h.isEmpty
-        if !h.isEmpty { await ImageBank.shared.prefetch(h.prefix(2).map { TMDB.img($0.poster ?? $0.back, 780) }); hero = h }
+        if !h.isEmpty {
+            await withTaskGroup(of: (Int, FilmDetail?).self) { g in
+                for f in h { g.addTask { (f.id, try? await TMDB.detail(f.id)) } }
+                for await (i, x) in g { if let x { details[i] = x } }
+            }
+            await ImageBank.shared.prefetch(h.prefix(2).flatMap { [TMDB.img(Visuel($0, details[$0.id]).path, 780), TMDB.img(details[$0.id]?.logo, 500)] })
+            hero = h
+        }
         await a
         let defs = RailDef.all(store).filter { !store.s.hidden.contains($0.id) }
         for (n, d) in defs.enumerated() {
@@ -116,7 +124,7 @@ struct RailDef: Identifiable, Hashable {
             if n >= 4 { ready = true }
         }
         ready = true
-        await ImageBank.shared.prefetch(h.map { TMDB.img($0.poster ?? $0.back, 780) })
+        await ImageBank.shared.prefetch(h.flatMap { [TMDB.img(Visuel($0, details[$0.id]).path, 780), TMDB.img(details[$0.id]?.logo, 500)] })
     }
     func load(_ d: RailDef, _ store: Store) async {
         var l: [Film] = []
@@ -173,7 +181,7 @@ struct HomeView: View {
                 }
             }
         }
-        .ignoresSafeArea(edges: .top)
+        .ignoresSafeArea(edges: .top).scrollEdgeEffectHidden(true, for: .top)
         .background { Ambient(path: (acc.hero.first { $0.id == current } ?? acc.hero.first).map { $0.back ?? $0.poster ?? "" }) }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Text("Mon Ciné").font(.system(.title2, design: .rounded, weight: .heavy)).fixedSize() }.sharedBackgroundVisibility(.hidden)
@@ -227,15 +235,18 @@ struct HeroCarousel: View {
 struct HeroCard: View {
     let film: Film
     @Environment(Store.self) private var store
-    @State private var d: FilmDetail?
+    @State private var tried = false
+    private var d: FilmDetail? { Accueil.shared.details[film.id] }
+    private var ready: Bool { d != nil || tried }
     var body: some View {
+        let art = Visuel(film, d)
         ZStack(alignment: .bottom) {
-            Color.clear.overlay { Pic(url: TMDB.img(film.poster ?? film.back, 780), loading: .white.opacity(0.05)) { Blank(title: "") }.phaseAnimator([1.0, 1.07]) { v, p in v.scaleEffect(p) } animation: { _ in .easeInOut(duration: 9) } }.clipped()
+            Color.clear.overlay { if ready { Pic(url: TMDB.img(art.path, 780)) { Blank(title: "") }.phaseAnimator([1.0, 1.07]) { v, p in v.scaleEffect(p) } animation: { _ in .easeInOut(duration: 9) } } }.clipped()
                 .mask { LinearGradient(stops: [.init(color: .black, location: 0.5), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom) }
             VStack(spacing: 14) {
                 if Affiche.shared.reissue(film) { Ressortie() }
                 if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Color.clear }.frame(maxWidth: 280, maxHeight: 100) }
-                else { Text(film.title).font(.system(size: 34, weight: .heavy, design: .rounded)).multilineTextAlignment(.center).lineLimit(3).minimumScaleFactor(0.6).shadow(radius: 12) }
+                else if ready && !art.titled { Text(film.title).font(.system(size: 34, weight: .heavy, design: .rounded)).multilineTextAlignment(.center).lineLimit(3).minimumScaleFactor(0.6).shadow(radius: 12) }
                 Text([d?.genres.prefix(2).joined(separator: ", "), d?.runtime.map(Jour.duree), film.note.map { "★ " + $0.fr }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ·  ")).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85))
                 GlassEffectContainer(spacing: 10) {
                     HStack(spacing: 10) {
@@ -252,7 +263,7 @@ struct HeroCard: View {
         .contentShape(.rect)
         .background { NavigationLink(value: Route.film(film, "hero-\(film.id)")) { Color.clear } }
         .modifier(ZoomSource(id: "hero-\(film.id)"))
-        .task { d = try? await TMDB.detail(film.id) }
+        .task { if d == nil, let x = try? await TMDB.detail(film.id) { Accueil.shared.details[film.id] = x }; tried = true }
     }
 }
 
@@ -337,23 +348,28 @@ struct CinemaRail: View {
 struct ACTile: View {
     let film: ACFilm, caption: String
     var width: CGFloat? = nil
-    var badge = true
+    var body: some View {
+        ACOpen(film: film) {
+            VStack(alignment: .leading, spacing: 7) {
+                Poster(path: film.poster, title: film.title, width: width).overlay(alignment: .topLeading) { if film.reissue { Ressortie(long: false).padding(5) } }
+                Text(film.title).font(.footnote.weight(.semibold)).lineLimit(1)
+                Text(caption).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }.frame(width: width)
+        }
+    }
+}
+struct ACOpen<L: View>: View {
+    let film: ACFilm
+    @ViewBuilder var label: L
     @State private var open: Film?
     @State private var busy = false
     @Environment(Store.self) private var store
     var body: some View {
         Button {
-            busy = true
+            guard !busy else { return }
+            Haptic.tap(); busy = true
             Task { do { if let f = try await TMDB.resolve(film) { open = f } else { Haptic.warn(); store.say("Fiche introuvable pour ce film") } } catch { store.say(error.localizedDescription) }; busy = false }
-        } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                Poster(path: film.poster, title: film.title, width: width).overlay(alignment: .topLeading) { if badge && film.reissue { Ressortie(long: false).padding(5).scaleEffect(width.map { $0 < 100 } == true ? 0.8 : 1, anchor: .topLeading) } }.overlay { if busy { ProgressView().padding(16).glassEffect(.regular, in: .circle) } }
-                if !caption.isEmpty {
-                    Text(film.title).font(.footnote.weight(.semibold)).lineLimit(1)
-                    Text(caption).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }.frame(width: width)
-        }
+        } label: { label.overlay { if busy { ProgressView().padding(14).glassEffect(.regular, in: .circle) } } }
         .buttonStyle(Press()).accessibilityLabel(film.title)
         .sheet(item: $open) { f in FilmSheet(film: f) }
     }

@@ -20,6 +20,15 @@ struct FilmDetail {
     var trailer: String?, logo: String?, votes = 0
     var stream: [Provider] = [], free: [Provider] = [], rent: [Provider] = [], buy: [Provider] = [], watchLink: URL?
     var similar: [Film] = []
+    var cleanPoster: String?, cleanBack: String?
+}
+/// Grande image sans texte ; à défaut l’affiche, qui porte déjà le titre
+struct Visuel {
+    var path: String?, titled = false
+    init(_ f: Film, _ d: FilmDetail?) {
+        path = d?.cleanPoster ?? d?.cleanBack ?? f.back
+        if path == nil { path = f.poster; titled = path != nil }
+    }
 }
 struct Rating: Codable, Hashable { var film: Film; var stars: Double; var comment: String; var date: Date }
 

@@ -55,58 +55,123 @@ struct LibraryView: View {
 
 // MARK: Recherche
 struct SearchView: View {
+    enum Scope: String, CaseIterable { case all = "Tout", films = "Films", people = "Personnes", cinemas = "Cinémas" }
     @Environment(Store.self) private var store
     @Environment(Position.self) private var pos
+    @AppStorage("recherches") private var saved = ""
     @State private var q = ""
+    @State private var scope = Scope.all
     @State private var films: [Film] = []
-    @State private var err: String?
-    @State private var busy = false
+    @State private var people: [Person] = []
     @State private var salles: [Cinema] = []
-    private let genres: [(String, String, String)] = [("cmy", "Comédie", "theatermasks.fill"), ("act", "Action", "bolt.fill"), ("drm", "Drame", "drop.fill"), ("trl", "Thriller", "eye.fill"), ("crm", "Policier", "magnifyingglass"), ("scf", "Science-fiction", "sparkles"), ("fml", "Famille", "figure.2.and.child.holdinghands"), ("ani", "Animation", "paintpalette.fill"), ("rma", "Romance", "heart.fill"), ("fnt", "Fantastique", "wand.and.stars"), ("hrr", "Horreur", "moon.fill"), ("doc", "Documentaire", "globe.europe.africa.fill"), ("war", "Guerre", "shield.fill"), ("msc", "Musique", "music.note"), ("hst", "Histoire", "building.columns.fill"), ("wsn", "Western", "sun.dust.fill")]
-    private var typing: Bool { q.trimmingCharacters(in: .whitespaces).count >= 2 }
+    @State private var done = ""
+    @State private var err: String?
+    private let genres: [(String, String)] = [("cmy", "Comédie"), ("act", "Action"), ("drm", "Drame"), ("trl", "Thriller"), ("scf", "Science-fiction"), ("fml", "Famille"), ("ani", "Animation"), ("rma", "Romance"), ("fnt", "Fantastique"), ("hrr", "Horreur"), ("doc", "Documentaire"), ("war", "Guerre")]
+    private var text: String { q.trimmingCharacters(in: .whitespaces) }
+    private var recents: [String] { saved.components(separatedBy: "\n").filter { !$0.isEmpty } }
+    private func keep() { guard text.count >= 2 else { return }; saved = ([text] + recents.filter { $0.lowercased() != text.lowercased() }).prefix(8).joined(separator: "\n") }
     var body: some View {
-        ScrollView {
-            if !typing {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    ForEach(Array(genres.enumerated()), id: \.offset) { i, g in
+        ScrollView { if text.count < 2 { browse } else { results } }
+            .background(Color.fond.ignoresSafeArea()).navigationTitle("Recherche").scrollEdgeEffectStyle(.hard, for: .top)
+            .scrollDismissesKeyboard(.immediately)
+            .searchable(text: $q, prompt: "Films, acteurs, cinémas").autocorrectionDisabled()
+            .onSubmit(of: .search) { keep() }
+            .task(id: q) { await search() }
+    }
+    // Avant de taper : recherches récentes, tendances, catégories
+    private var browse: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            if !recents.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack { Text("Récentes").font(.title3.bold()); Spacer(); Button("Effacer") { withAnimation { saved = "" } }.font(.subheadline) }.padding(.horizontal, 18)
+                    ScrollView(.horizontal) { HStack(spacing: 8) { ForEach(recents, id: \.self) { r in Chip(text: r, icon: "clock") { q = r } } }.padding(.horizontal, 18) }.scrollIndicators(.hidden).scrollClipDisabled()
+                }
+            }
+            if let t = Accueil.shared.rails["trend"], !t.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tendances en France").font(.title3.bold()).padding(.horizontal, 18)
+                    ForEach(Array(t.prefix(5).enumerated()), id: \.element.id) { i, f in
+                        NavigationLink(value: Route.film(f, "st-\(f.id)")) { FilmRow(film: f, rank: i + 1, source: "st-\(f.id)") }.buttonStyle(Press())
+                        if i < 4 { Divider().padding(.leading, 112) }
+                    }
+                }
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Parcourir").font(.title3.bold()).padding(.horizontal, 18)
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 12) {
+                    ForEach(genres, id: \.0) { g in
                         NavigationLink(value: Route.grid(GridQuery(title: g.1, path: "jw", params: ["genres": g.0, "mix": "1"]))) {
-                            HStack { Text(g.1).font(.headline).lineLimit(1).minimumScaleFactor(0.7); Spacer(); Image(systemName: g.2).font(.title2).foregroundStyle(.white.opacity(0.8)) }.padding(16).frame(height: 84)
-                                .background(LinearGradient(colors: [Color(hue: Double(i) / Double(genres.count), saturation: 0.6, brightness: 0.6).opacity(0.55), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), in: .rect(cornerRadius: 24))
-                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 24)).contentShape(.rect)
+                            Color.white.opacity(0.07).frame(height: 96)
+                                .overlay { if let b = art[g.0] { Pic(url: TMDB.img(b, 300)) { Color.clear } } }
+                                .overlay { LinearGradient(colors: [.black.opacity(0.15), .black.opacity(0.75)], startPoint: .top, endPoint: .bottom) }
+                                .overlay(alignment: .bottomLeading) { Text(g.1).font(.headline).lineLimit(1).minimumScaleFactor(0.7).padding(12) }
+                                .clipShape(.rect(cornerRadius: 18, style: .continuous)).contentShape(.rect)
                         }.buttonStyle(Press())
                     }
-                }.padding(18)
-            } else {
-                let c = salles
-                VStack(alignment: .leading, spacing: 16) {
-                    if !c.isEmpty { RailHead(title: "Cinémas", icon: "popcorn.fill"); VStack(spacing: 6) { ForEach(c) { x in NavigationLink(value: Route.cinema(x)) { CinemaLine(cinema: x) }.buttonStyle(.plain) } }.card().padding(.horizontal, 18) }
-                    RailHead(title: "Films", icon: "film.fill")
-                    if let err { Note(text: err).padding(.horizontal, 18) } else if busy && films.isEmpty { GhostRail() } else if films.isEmpty { Text("Aucun film trouvé.").foregroundStyle(.secondary).padding(.horizontal, 18) }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 12)], spacing: 18) { ForEach(films) { FilmTile(film: $0, source: "s-\($0.id)", width: nil) } }.padding(.horizontal, 18)
-                }.padding(.vertical, 12)
+                }.padding(.horizontal, 18)
             }
-        }
-        .background(Ambient(path: nil)).navigationTitle("Recherche")
-        .scrollDismissesKeyboard(.immediately)
-        .searchable(text: $q, prompt: "Film, cinéma, ville").autocorrectionDisabled()
-        .task(id: q) {
-            let s = q.trimmingCharacters(in: .whitespaces)
-            guard s.count >= 2 else { films = []; salles = []; err = nil; busy = false; return }
-            busy = true
-            try? await Task.sleep(for: .milliseconds(300))
+        }.padding(.vertical, 12)
+    }
+    /// Un visuel différent par catégorie
+    private var art: [String: String] {
+        var used = Set<Int>(), out: [String: String] = [:]
+        for g in genres { if let f = Accueil.shared.rails["g" + g.0]?.first(where: { $0.back != nil && !used.contains($0.id) }) { used.insert(f.id); out[g.0] = f.back } }
+        return out
+    }
+    private var results: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ScrollView(.horizontal) { HStack(spacing: 8) { ForEach(Scope.allCases, id: \.self) { s in Chip(text: s.rawValue, on: s == scope) { scope = s } } }.padding(.horizontal, 18) }.scrollIndicators(.hidden).scrollClipDisabled().padding(.bottom, 14)
+            if let err { Note(text: err, icon: "wifi.exclamationmark") { Task { await search() } }.padding(.horizontal, 18) }
+            else if done.isEmpty { ForEach(0..<6, id: \.self) { _ in HStack(spacing: 14) { RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.08)).frame(width: 56, height: 84); VStack(alignment: .leading, spacing: 8) { Capsule().fill(.white.opacity(0.1)).frame(width: 170, height: 13); Capsule().fill(.white.opacity(0.07)).frame(width: 90, height: 11) }; Spacer() }.padding(.horizontal, 18).padding(.vertical, 8) }.modifier(Shimmer()) }
+            else if films.isEmpty && people.isEmpty && salles.isEmpty { ContentUnavailableView.search(text: text).padding(.top, 40) }
+            if !done.isEmpty {
+                if scope == .all || scope == .cinemas { section("Cinémas", salles.count); ForEach(scope == .all ? Array(salles.prefix(2)) : salles) { c in link(.cinema(c)) { CinemaLine(cinema: c).padding(.horizontal, 18).padding(.vertical, 6) } } }
+                if (scope == .all || scope == .people) && !people.isEmpty {
+                    section("Personnes", people.count)
+                    if scope == .all { RailScroll(spacing: 14) { ForEach(people.prefix(8)) { p in link(.person(p)) { VStack(spacing: 6) { face(p, 72); Text(p.name).font(.caption).lineLimit(2, reservesSpace: true).multilineTextAlignment(.center) }.frame(width: 84) } } }.padding(.bottom, 8) }
+                    else { ForEach(people) { p in link(.person(p)) { HStack(spacing: 14) { face(p, 56); Text(p.name).font(.headline); Spacer(); Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }.padding(.horizontal, 18).padding(.vertical, 6).contentShape(.rect) } } }
+                }
+                if scope == .all || scope == .films { section("Films", films.count); ForEach(films) { f in link(.film(f, "s-\(f.id)")) { FilmRow(film: f, source: "s-\(f.id)") }; Divider().padding(.leading, 88) } }
+            }
+        }.padding(.vertical, 12)
+    }
+    @ViewBuilder private func section(_ t: String, _ n: Int) -> some View { if scope == .all && n > 0 { Text(t).font(.title3.bold()).padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 8) } }
+    private func link<L: View>(_ r: Route, @ViewBuilder _ l: () -> L) -> some View { NavigationLink(value: r) { l() }.buttonStyle(Press()).simultaneousGesture(TapGesture().onEnded { keep() }) }
+    private func face(_ p: Person, _ s: CGFloat) -> some View { Pic(url: TMDB.img(p.photo, 185), loading: .white.opacity(0.07)) { Color.white.opacity(0.07) }.frame(width: s, height: s).clipShape(.circle) }
+    private func search() async {
+        let s = text
+        guard s.count >= 2 else { films = []; people = []; salles = []; done = ""; err = nil; scope = .all; return }
+        try? await Task.sleep(for: .milliseconds(300))
+        if Task.isCancelled { return }
+        let near = pos.best
+        async let c = Task.detached { Salles.search(s, near: near, max: 15) }.value
+        async let p = TMDB.people(s)
+        do {
+            let r = try await TMDB.search(s), pp = (try? await p) ?? [], cc = await c
+            await ImageBank.shared.prefetch(r.prefix(5).map { TMDB.img($0.poster, 185) })
             if Task.isCancelled { return }
-            let near = pos.best
-            let c = await Task.detached { Salles.search(s, near: near, max: 4) }.value
-            if Task.isCancelled { return }
-            salles = c
-            do {
-                let r = try await TMDB.search(s)
-                await ImageBank.shared.prefetch(r.prefix(6).map { TMDB.img($0.poster, 342) })
-                if Task.isCancelled { return }
-                films = r; err = nil
-            } catch is CancellationError { return } catch { if Task.isCancelled { return }; err = error.localizedDescription }
-            busy = false
-        }
+            films = r; people = pp; salles = cc; done = s; err = nil
+        } catch is CancellationError { return } catch { if !Task.isCancelled { err = error.localizedDescription } }
+    }
+}
+struct FilmRow: View {
+    let film: Film
+    var rank: Int? = nil
+    let source: String
+    @Environment(Store.self) private var store
+    var body: some View {
+        HStack(spacing: 14) {
+            if let rank { Text("\(rank)").font(.system(.title2, design: .rounded, weight: .heavy)).foregroundStyle(.secondary).frame(width: 24) }
+            Poster(path: film.poster, title: film.title, width: 56, size: 185).modifier(ZoomSource(id: source))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(film.title).font(.headline).lineLimit(2).multilineTextAlignment(.leading)
+                Text([film.year, film.note.map { "★ " + $0.fr }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                if Affiche.shared.reissue(film) { Ressortie() } else if Affiche.shared.has(film) { Label("Au cinéma", systemImage: "popcorn.fill").font(.caption.weight(.semibold)).foregroundStyle(Color.or) }
+            }
+            Spacer(minLength: 0)
+            if store.liked(film.id) { Image(systemName: "heart.fill").foregroundStyle(Color.rose) }
+            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+        }.padding(.horizontal, 18).padding(.vertical, 8).contentShape(.rect)
     }
 }
 

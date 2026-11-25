@@ -33,15 +33,21 @@ struct Slot: View {
     let action: () -> Void
     var body: some View {
         Button { Haptic.tap(); action() } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(Jour.heure(seance.start)).font(.headline).monospacedDigit()
-                if let e = seance.end { Text("fin " + Jour.heure(e)).font(.caption2).foregroundStyle(.secondary) }
-                Text(([seance.label, seance.version] + seance.formats).filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption2.weight(.semibold)).foregroundStyle(saved ? .white : Color.or).lineLimit(2).multilineTextAlignment(.leading)
-            }.padding(.horizontal, 11).padding(.vertical, 9).frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
-                .background(saved ? Color.or.opacity(0.35) : .white.opacity(0.08), in: .rect(cornerRadius: 15))
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(Jour.heure(seance.start)).font(.headline).monospacedDigit()
+                    if saved { Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(Color.or) }
+                    Spacer(minLength: 8)
+                    Text(seance.version).font(.caption2.weight(.bold)).foregroundStyle(Color.or)
+                }
+                Text(([seance.label] + seance.formats).filter { !$0.isEmpty }.joined(separator: " · ").nonEmpty ?? seance.end.map { "fin " + Jour.heure($0) } ?? " ").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }.padding(.horizontal, 12).frame(minWidth: 104, maxWidth: 190, alignment: .leading).frame(height: 56)
+                .background(saved ? Color.or.opacity(0.25) : .white.opacity(0.09), in: .rect(cornerRadius: 14)).fixedSize(horizontal: true, vertical: false)
         }.buttonStyle(Press())
+        .accessibilityLabel("\(Jour.heure(seance.start)), \(([seance.version] + seance.formats).joined(separator: ", "))")
     }
 }
+extension String { var nonEmpty: String? { isEmpty ? nil : self } }
 struct Slots: View {
     let seances: [Seance], cinema: Cinema, title: String, poster: String?, filmID: Int?, acID: Int
     @Environment(Store.self) private var store
@@ -51,9 +57,10 @@ struct Slots: View {
         return store.inAgenda(id) ?? AgendaItem(id: id, filmID: filmID, title: title, poster: poster, cinema: cinema, start: s.start, end: s.end ?? s.start.addingTimeInterval(7200), version: s.version, formats: s.formats, url: s.url)
     }
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
-            ForEach(seances) { s in let a = item(s); Slot(seance: s, saved: store.inAgenda(a.id) != nil) { open = a } }
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) { ForEach(seances) { s in let a = item(s); Slot(seance: s, saved: store.inAgenda(a.id) != nil) { open = a } } }
         }
+        .scrollIndicators(.hidden).contentMargins(.horizontal, 14, for: .scrollContent).frame(height: 56)
         .sheet(item: $open) { SeanceSheet(item: $0) }
     }
 }
@@ -97,9 +104,9 @@ struct FilmSeances: View {
             }.scrollIndicators(.hidden).scrollClipDisabled()
             ForEach(rows, id: \.1) { c, f, s in
                 VStack(alignment: .leading, spacing: 12) {
-                    NavigationLink(value: Route.cinema(c)) { CinemaLine(cinema: c) }.buttonStyle(.plain)
+                    NavigationLink(value: Route.cinema(c)) { CinemaLine(cinema: c) }.buttonStyle(.plain).padding(.horizontal, 14)
                     Slots(seances: s, cinema: c, title: film.title, poster: film.poster ?? f.poster, filmID: film.id, acID: f.movie)
-                }.card().padding(.horizontal, 18).transition(.blurReplace)
+                }.padding(.vertical, 14).surface().padding(.horizontal, 18)
             }
             VStack(spacing: 10) {
                 if busy { HStack { ProgressView(); Text("Lecture des programmes : \(list.filter { got[$0.id] != nil }.count) sur \(list.count)").font(.subheadline).foregroundStyle(.secondary).contentTransition(.numericText()) }.frame(maxWidth: .infinity) }
@@ -183,9 +190,13 @@ struct Programmation: View {
         let rows = (p?.films ?? []).map { ($0, garde($0.seances, ver)) }.filter { !$0.1.isEmpty }
         VStack(alignment: .leading, spacing: 14) {
             DayStrip(day: $day)
-            HStack(spacing: 8) { Chip(text: "VF", on: ver == "VF") { ver = ver == "VF" ? "" : "VF" }; Chip(text: "VO", on: ver == "VO") { ver = ver == "VO" ? "" : "VO" }; Spacer() }.padding(.horizontal, 18)
+            HStack(spacing: 8) {
+                Chip(text: "Tout", on: ver.isEmpty) { ver = "" }; Chip(text: "VF", on: ver == "VF") { ver = "VF" }; Chip(text: "VO", on: ver == "VO") { ver = "VO" }
+                Spacer()
+                if p != nil { Text("\(rows.count) film\(rows.count > 1 ? "s" : "")").font(.footnote).foregroundStyle(.secondary) }
+            }.padding(.horizontal, 18)
             if let err { Note(text: err, icon: "exclamationmark.triangle") { retry += 1 }.padding(.horizontal, 18) }
-            else if p == nil { ForEach(0..<3, id: \.self) { _ in RoundedRectangle(cornerRadius: 24).fill(.white.opacity(0.07)).frame(height: 150).modifier(Shimmer()) }.padding(.horizontal, 18) }
+            else if p == nil { ForEach(0..<3, id: \.self) { _ in RoundedRectangle(cornerRadius: 24).fill(.white.opacity(0.07)).frame(height: 177).modifier(Shimmer()) }.padding(.horizontal, 18) }
             else if rows.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "moon.zzz.fill").font(.largeTitle).foregroundStyle(.secondary)
@@ -194,16 +205,21 @@ struct Programmation: View {
                 }.frame(maxWidth: .infinity).card().padding(.horizontal, 18)
             }
             ForEach(rows, id: \.0.id) { f, s in
-                HStack(alignment: .top, spacing: 14) {
-                    ACTile(film: f, caption: "", width: 86, badge: false)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(f.title).font(.headline)
-                        if f.reissue { Ressortie() }
-                        Text([f.runtime.map(Jour.duree), f.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
-                        if !f.director.isEmpty { Text("De " + f.director).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-                        Slots(seances: s, cinema: cinema, title: f.title, poster: f.poster, filmID: nil, acID: f.movie).padding(.top, 6)
-                    }
-                }.card().padding(.horizontal, 18).scrollTransition { v, x in v.opacity(x.isIdentity ? 1 : 0.5).scaleEffect(x.isIdentity ? 1 : 0.96) }
+                VStack(alignment: .leading, spacing: 12) {
+                    ACOpen(film: f) {
+                        HStack(spacing: 12) {
+                            Poster(path: f.poster, title: f.title, width: 54)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(f.title).font(.headline).lineLimit(2).multilineTextAlignment(.leading)
+                                Text([f.runtime.map(Jour.duree), f.genres.prefix(2).joined(separator: ", ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                if f.reissue { Ressortie() }
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                        }.frame(height: 81).contentShape(.rect)
+                    }.padding(.horizontal, 14)
+                    Slots(seances: s, cinema: cinema, title: f.title, poster: f.poster, filmID: nil, acID: f.movie)
+                }.padding(.vertical, 14).surface().padding(.horizontal, 18)
             }
             if let p { Text("Horaires vérifiés \(p.at.formatted(.relative(presentation: .named).locale(Locale(identifier: "fr_FR"))))" + (p.stale ? " · mise à jour indisponible" : "") + (p.partial ? " · liste incomplète" : "")).font(.caption).foregroundStyle(.tertiary).padding(.horizontal, 18) }
         }
@@ -225,7 +241,7 @@ struct CinemaView: View {
                 }.card().padding(.horizontal, 18)
                 Programmation(cinema: cinema)
             }.padding(.bottom, 40)
-        }.background(Ambient(path: nil)).navigationTitle(cinema.name).navigationBarTitleDisplayMode(.inline)
+        }.background(Ambient(path: nil)).navigationTitle(cinema.name).navigationBarTitleDisplayMode(.inline).scrollEdgeEffectStyle(.hard, for: .top)
     }
 }
 enum Plan {
@@ -253,7 +269,7 @@ struct CineTab: View {
                 }
             }.padding(.vertical, 12)
         }
-        .background(Ambient(path: nil)).navigationTitle("Séances")
+        .background(Ambient(path: nil)).navigationTitle("Séances").scrollEdgeEffectStyle(.hard, for: .top)
         .toolbar { Button("Ajouter un cinéma", systemImage: "plus") { add = true } }
         .sheet(isPresented: $add) { CinemaPicker() }
     }

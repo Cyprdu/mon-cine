@@ -247,6 +247,8 @@ struct RailScroll<Content: View>: View {
 extension View {
     /// Les tuiles s’effacent doucement aux bords
     func railFade() -> some View { scrollTransition(.interactive, axis: .horizontal) { v, p in v.scaleEffect(p.isIdentity ? 1 : 0.9).opacity(p.isIdentity ? 1 : 0.55) } }
+    /// Surface pleine pour les listes : le verre reste réservé aux commandes
+    func surface() -> some View { frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.055), in: .rect(cornerRadius: 22, style: .continuous)).clipShape(.rect(cornerRadius: 22, style: .continuous)) }
     func card(_ r: CGFloat = 24) -> some View { padding(16).frame(maxWidth: .infinity, alignment: .leading).glassEffect(.regular, in: .rect(cornerRadius: r, style: .continuous)) }
 }
 struct RailHead: View {

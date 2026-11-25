@@ -92,8 +92,15 @@ enum TMDB {
         let l = (try await a + b).filter { seen.insert($0.id).inserted }
         return l.filter { $0.poster != nil } + l.filter { $0.poster == nil }
     }
+    static func people(_ q: String) async throws -> [Person] {
+        let j = try await get("/search/person", ["query": q, "include_adult": "false"], ttl: 86400)
+        return ((j["results"] as? [J]) ?? []).compactMap { x in
+            guard let i = x["id"] as? Int, let n = x["name"] as? String, let p = x["profile_path"] as? String else { return nil }
+            return Person(id: i, name: n, role: x["known_for_department"] as? String == "Directing" ? "Director" : "", photo: p)
+        }
+    }
     static func detail(_ id: Int) async throws -> FilmDetail {
-        let j = try await get("/movie/\(id)", ["append_to_response": "credits,videos,watch/providers,recommendations,images", "include_video_language": "fr,en", "include_image_language": "fr,en"], ttl: 3 * 86400)
+        let j = try await get("/movie/\(id)", ["append_to_response": "credits,videos,watch/providers,recommendations,images", "include_video_language": "fr,en", "include_image_language": "fr,en,null"], ttl: 3 * 86400)
         guard let f = film(j) else { throw Oops("Film introuvable") }
         var d = FilmDetail(film: f)
         let ot = j["original_title"] as? String ?? ""
@@ -110,6 +117,12 @@ enum TMDB {
         d.trailer = (((j["videos"] as? J)?["results"] as? [J]) ?? []).filter {
             $0["site"] as? String == "YouTube" && ["Trailer", "Teaser"].contains($0["type"] as? String ?? "") && ($0["key"] as? String ?? "").wholeMatch(of: /[\w-]{6,20}/) != nil
         }.max { (score($0), $0["published_at"] as? String ?? "") < (score($1), $1["published_at"] as? String ?? "") }?["key"] as? String
+        // « Aucune langue » sur TMDB : images sans texte, la mieux votée d’abord
+        func clean(_ k: String) -> String? {
+            let l = (((j["images"] as? J)?[k] as? [J]) ?? []).filter { $0["iso_639_1"] == nil || $0["iso_639_1"] is NSNull }
+            return l.max { ($0["vote_average"] as? Double ?? 0, $0["vote_count"] as? Int ?? 0) < ($1["vote_average"] as? Double ?? 0, $1["vote_count"] as? Int ?? 0) }?["file_path"] as? String
+        }
+        d.cleanPoster = clean("posters"); d.cleanBack = clean("backdrops")
         let logos = ((j["images"] as? J)?["logos"] as? [J]) ?? []
         d.logo = (logos.first { $0["iso_639_1"] as? String == "fr" } ?? logos.first)?["file_path"] as? String
         if d.logo?.hasSuffix(".svg") == true { d.logo = nil }
