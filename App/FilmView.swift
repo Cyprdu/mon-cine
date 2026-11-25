@@ -225,7 +225,8 @@ struct YouTube: UIViewRepresentable {
 /// Le son choisi vaut pour les bandes-annonces suivantes, jusqu’à la fermeture de l’app
 @MainActor @Observable final class Son {
     static let shared = Son()
-    var on = false, visible = false
+    var on = false
+    var visible = false
     @ObservationIgnored weak var web: WKWebView?
     func basculer() { on.toggle(); appliquer() }
     /// Commande directe au lecteur, puis vérification : s’il est resté muet ou s’est arrêté, il est relancé avec le son
@@ -242,7 +243,7 @@ struct YouTube: UIViewRepresentable {
     func fin(_ w: WKWebView) {
         guard web === w else { return }
         web = nil
-        Task { if self.web == nil || !self.on { self.visible = false } }
+        Task { if self.web == nil { self.visible = false } }
         if on { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
     }
 }
