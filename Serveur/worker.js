@@ -215,7 +215,7 @@ async function tour(e) {
     const w = (await e.DB.prepare(`select tmdb from films where ac is null and ${OK} and (wiki is null or wiki<?1-432000) limit 60`).bind(t).all()).results;
     if (w.length) return wikidata(e, w.map(x => x.tmdb));
   }
-  if (t - +(await get(e, "recense") || 0) > 30 * JOUR) return departement(e);
+  if (m % 2 === 0 && t - +(await get(e, "recense") || 0) > 30 * JOUR) return departement(e);
   // Sur dix minutes : sept salles, une ou deux pages de film, deux dates de ville
   const o = m === 3 ? [film, ville, salle] : m === 6 || m === 8 ? [ville, film, salle] : [salle, film, ville];
   for (const f of o) if (await f(e)) return;
