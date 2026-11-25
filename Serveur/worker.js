@@ -134,13 +134,13 @@ async function salle(e) {
   ]);
   return true;
 }
-/** Programmation des indépendants : tout le fichier, mille lignes par passage, chaque nuit */
+/** Programmation des indépendants : tout le fichier, cinq cents lignes par passage, chaque nuit */
 async function independants(e) {
   const t = now(), champs = "showid,cineid,cinenom,cineville,cineadresse,cinecp,_coords.lat,_coords.lon,filmtitle,filmposter,filmversion,showstart,showurl,_donnees_imdb.id";
   let u = await get(e, "ind_url"), debut = +(await get(e, "ind_debut") || 0);
   if (!u) {
     if (t - debut < 22 * 3600) return false;
-    u = `https://datacinesindes.fr/data-fair/api/v1/datasets/programmation-cinemas/lines?size=1000&select=${champs}`;
+    u = `https://datacinesindes.fr/data-fair/api/v1/datasets/programmation-cinemas/lines?size=500&select=${champs}`;
     debut = t; await put(e, "ind_debut", t); await put(e, "ind_url", u);
   }
   const r = await fetch(u, { headers: UA, signal: AbortSignal.timeout(25000) });
