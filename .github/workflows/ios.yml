@@ -27,11 +27,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: "MonCine-ipa-${{ matrix.os }}", path: MonCine.ipa }
       - name: Publier
+        continue-on-error: true   # une panne de GitHub ne doit pas empêcher les tests
         if: github.ref == 'refs/heads/main'
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "Mon Ciné" --notes "IPA non signé, à installer avec SideStore, AltStore ou Sideloadly." --latest
-          gh release upload latest MonCine.ipa --clobber
+          for n in 1 2 3; do gh release upload latest MonCine.ipa --clobber && exit 0; sleep 15; done; exit 1
       - name: Tests et captures
         run: |
           UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print([x["udid"] for k in sorted(d,reverse=True) if "iOS-26" in k for x in d[k] if "Pro" in x["name"] and "iPhone" in x["name"]][0])')
