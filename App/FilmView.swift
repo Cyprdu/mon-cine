@@ -211,21 +211,33 @@ struct YouTube: UIViewRepresentable {
     static func dismantleUIView(_ w: WKWebView, coordinator: ()) { w.loadHTMLString("", baseURL: nil) }
 }
 
-/// Bande-annonce muette, sans lecteur ni geste ; l’image reste devant tant que la vidéo n’a pas vraiment démarré.
+/// Le son choisi vaut pour les bandes-annonces suivantes, jusqu’à la fermeture de l’app
+@MainActor @Observable final class Son { static let shared = Son(); var on = false }
+/// Bande-annonce sans lecteur ; l’image reste devant tant que la vidéo n’a pas vraiment démarré.
 struct Bande: View {
     let key: String
     @State private var visible = false
+    private var son = Son.shared
+    init(key: String) { self.key = key }
     var body: some View {
         GeometryReader { g in
-            let h = max(g.size.height, g.size.width * 9 / 16) * 1.06   // remplit le cadre, bords rognés
-            BandeWeb(key: key, visible: $visible).frame(width: h * 16 / 9, height: h).position(x: g.size.width / 2, y: g.size.height / 2)
+            // Page rendue en 1920 × 1080 pour que YouTube choisisse la HD, puis mise à l’échelle : remplit tout le cadre, bandes noires du format large comprises
+            let k = max(g.size.width / 1920, g.size.height / 1080) * 1.34
+            BandeWeb(key: key, visible: $visible, son: son.on).frame(width: 1920, height: 1080).scaleEffect(k).position(x: g.size.width / 2, y: g.size.height / 2)
+                .allowsHitTesting(false).accessibilityHidden(true)
+            if visible {
+                Button { Haptic.tap(); son.on.toggle() } label: { Image(systemName: son.on ? "speaker.wave.2.fill" : "speaker.slash.fill").font(.subheadline).contentTransition(.symbolEffect(.replace)).frame(width: 40, height: 40) }
+                    .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel(son.on ? "Couper le son" : "Activer le son")
+                    .position(x: g.size.width - 38, y: 138)
+            }
         }
-        .opacity(visible ? 1 : 0).animation(.easeInOut(duration: 0.8), value: visible).allowsHitTesting(false).accessibilityHidden(true)
+        .clipped().opacity(visible ? 1 : 0).animation(.easeInOut(duration: 0.8), value: visible)
     }
 }
 struct BandeWeb: UIViewRepresentable {
     let key: String
     @Binding var visible: Bool
+    var son = false
     final class C: NSObject, WKScriptMessageHandler {
         let set: (Bool) -> Void
         init(_ s: @escaping (Bool) -> Void) { set = s }
@@ -238,22 +250,26 @@ struct BandeWeb: UIViewRepresentable {
         c.userContentController.add(context.coordinator, name: "etat")
         let w = WKWebView(frame: .zero, configuration: c)
         w.isOpaque = false; w.backgroundColor = .clear; w.scrollView.isScrollEnabled = false; w.isUserInteractionEnabled = false
+        w.scrollView.contentInsetAdjustmentBehavior = .never   // sinon une marge reste en haut, sous l’heure
         w.loadHTMLString("""
-        <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="strict-origin-when-cross-origin">
+        <!doctype html><meta name="viewport" content="width=1920,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body,#p{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;border:0}</style><div id="p"></div>
         <script src="https://www.youtube.com/iframe_api"></script>
         <script>
         function dis(m){webkit.messageHandlers.etat.postMessage(m)}
         var vu=false;
-        function onYouTubeIframeAPIReady(){new YT.Player('p',{width:'100%',height:'100%',videoId:'\(key)',host:'https://www.youtube-nocookie.com',
-        playerVars:{autoplay:1,mute:1,controls:0,disablekb:1,fs:0,modestbranding:1,playsinline:1,rel:0,iv_load_policy:3,cc_load_policy:0,start:4,origin:'https://fr.cyprdu.moncine'},
-        events:{onReady:function(e){e.target.mute();e.target.playVideo()},onError:function(){dis('off')},
-        onStateChange:function(e){if(e.data===1&&!vu){vu=true;setTimeout(function(){dis('on')},2600)}if(e.data===0)dis('off')}}})}
+        var P;
+        function soustitres(p){try{p.unloadModule('captions');p.unloadModule('cc');p.setOption('captions','track',{})}catch(e){}}
+        function son(v){if(P&&P.mute){if(v){P.unMute();P.setVolume(100)}else{P.mute()}}}
+        function onYouTubeIframeAPIReady(){P=new YT.Player('p',{width:'100%',height:'100%',videoId:'\(key)',host:'https://www.youtube-nocookie.com',
+        playerVars:{autoplay:1,mute:1,controls:0,disablekb:1,fs:0,modestbranding:1,playsinline:1,rel:0,iv_load_policy:3,start:4,origin:'https://fr.cyprdu.moncine'},
+        events:{onReady:function(e){e.target.mute();soustitres(e.target);e.target.playVideo()},onApiChange:function(e){soustitres(e.target)},onError:function(){dis('off')},
+        onStateChange:function(e){if(e.data===1){soustitres(e.target)}if(e.data===1&&!vu){vu=true;e.target.setPlaybackQuality('hd1080');setTimeout(function(){son(\(son ? "true" : "false"));dis('on')},2600)}if(e.data===0)dis('off')}}})}
         </script>
         """, baseURL: URL(string: "https://fr.cyprdu.moncine")!)
         return w
     }
-    func updateUIView(_ w: WKWebView, context: Context) {}
+    func updateUIView(_ w: WKWebView, context: Context) { w.evaluateJavaScript("typeof son==='function'&&vu&&son(\(son))") }
     static func dismantleUIView(_ w: WKWebView, coordinator: C) {
         w.configuration.userContentController.removeScriptMessageHandler(forName: "etat")
         w.loadHTMLString("", baseURL: nil)

@@ -135,6 +135,19 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
         withAnimation { tickets.removeAll { $0.id == t.id } }
         for i in s.agenda.indices where s.agenda[i].tickets.contains(t.id) { s.agenda[i].tickets.removeAll { $0 == t.id } }
     }
+    /// Comme une première installation : clé, données, billets, caches, rappels
+    func reset() {
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        if !TMDB.demo {
+            Trousseau.write(nil)
+            if let b = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: b) }
+            for f in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] { try? FileManager.default.removeItem(at: f) }
+        }
+        Disk.clear(); URLCache.shared.removeAllCachedResponses(); ImageBank.shared.vider()
+        Registre.shared.vider(); Accueil.shared.vider()
+        pendingFile = nil; hasKey = false; tickets = []; s = Saved()
+    }
     func say(_ m: String) { toast = m }
 }
 

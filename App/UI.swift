@@ -65,6 +65,7 @@ final class ImageBank {
         return URLSession(configuration: c)
     }()
     init() { mem.totalCostLimit = 420 << 20 }
+    func vider() { mem.removeAllObjects(); session.configuration.urlCache?.removeAllCachedResponses() }
     /// Affiches préparées avant d’arriver à l’écran
     func prefetch(_ l: [URL?]) async {
         await withTaskGroup(of: Void.self) { g in for u in l { if let u { g.addTask { _ = await self.load(u) } } } }

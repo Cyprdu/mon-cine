@@ -2,6 +2,7 @@ import SwiftUI
 import UserNotifications
 import BackgroundTasks
 import CoreLocation
+import MapKit
 
 // MARK: Base des ressorties (serveur personnel)
 struct Ville: Codable, Hashable, Identifiable {
@@ -17,9 +18,50 @@ struct Reprise: Codable, Hashable {
         let t = Jour.cine(.now)
         let l = (villes ?? []).map { v -> Ville in var v = v; v.dates = v.dates.filter { $0 >= t }; return v }
         let noms = Set(l.map(\.nom))
-        return l.filter { $0.base == $0.nom || !noms.contains($0.base) }
+        var out: [Ville] = []
+        for v in l.filter({ $0.base == $0.nom || !noms.contains($0.base) }).sorted(by: { $0.loc > $1.loc }) {   // numéro négatif : indépendants
+            if v.loc < 0, let i = out.firstIndex(where: { Match.plat($0.base) == Match.plat(v.base) }) {
+                if !out[i].dates.isEmpty { out[i].dates = Array(Set(out[i].dates + v.dates)).sorted() }
+            } else { var w = v; w.dates.sort(); if v.loc < 0 { w.nom = v.nom.localizedCapitalized }; out.append(w) }
+        }
+        return out
     }
     var film: Film? { tmdb.map { Film(id: $0, title: titre ?? "", release: sortie ?? "", poster: affiche) } }
+}
+/// Horaires gardés par la base : salles AlloCiné lues hier ou aujourd’hui, indépendants sur plusieurs semaines
+struct Horaires: Codable {
+    struct S: Codable { var id: String, nom: String?, adr: String?, h: [String] }
+    struct I: Codable { var id: String, cine: Int, nom: String?, ville: String?, adr: String?, lat: Double?, lon: Double?, d: String, v: String?, u: String? }
+    var salles: [S], ind: [I]
+    private static func fin(_ d: Date, _ r: Int?) -> Date? { r.map { d.addingTimeInterval(Double($0) * 60) } }
+    /// Cinéma indépendant ramené à celui de la liste AlloCiné quand il est au même endroit
+    private static func cinema(_ i: I) -> Cinema {
+        let at = Salles.villes[Match.plat(i.ville ?? "")], p = CLLocationCoordinate2D(latitude: i.lat ?? at?.latitude ?? 46.6, longitude: i.lon ?? at?.longitude ?? 2.4)
+        if i.lat != nil, let c = Salles.search("", near: p, max: 1).first, Salles.km(c, p) < 0.25 { return c }
+        return Cinema(id: "ind-\(i.cine)", name: i.nom ?? "Cinéma", address: (i.adr ?? "").trimmingCharacters(in: .whitespaces) + " " + (i.ville ?? ""), lat: p.latitude, lon: p.longitude)
+    }
+    func rows(_ runtime: Int?) -> [Pres.Row] {
+        var out: [Pres.Row] = []
+        for s in salles {
+            let l = s.h.compactMap { x -> Seance? in
+                let p = x.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                guard let d = Jour.local(p[0]) else { return nil }
+                return Seance(id: "b-" + s.id + x, start: d, end: Self.fin(d, runtime), version: p.count > 1 && p[1] == "VO" ? "VOST" : "VF", formats: [], url: nil, label: "")
+            }
+            let c = Salles.parID[s.id] ?? Cinema(id: s.id, name: s.nom ?? "Cinéma", address: s.adr ?? "", lat: 46.6, lon: 2.4)
+            if !l.isEmpty { out.append(.init(cinema: c, seances: l)) }
+        }
+        for (_, g) in Dictionary(grouping: ind, by: \.cine) {
+            let c = Self.cinema(g[0])
+            if out.contains(where: { $0.cinema.id == c.id }) { out.removeAll { $0.cinema.id == c.id } }   // la programmation du cinéma va plus loin
+            let l = g.compactMap { x -> Seance? in
+                guard let d = Jour.local(x.d) else { return nil }
+                return Seance(id: "i-" + x.id, start: d, end: Self.fin(d, runtime), version: x.v == "VERSION_ORIGINAL" || x.v?.hasPrefix("VERSION_ORIGINAL_S") == true ? "VOST" : "VF", formats: [], url: x.u.flatMap { $0.hasPrefix("https://") ? $0 : nil }, label: "")
+            }
+            if !l.isEmpty { out.append(.init(cinema: c, seances: l.sorted { $0.start < $1.start })) }
+        }
+        return out
+    }
 }
 @MainActor @Observable final class Registre {
     static let shared = Registre()
@@ -54,6 +96,12 @@ struct Reprise: Codable, Hashable {
         if let r = await get("film/\(f.id)", ttl: 600, as: Reprise.self), r.tmdb != nil { films[f.id] = r; return r }
         return films[f.id]
     }
+    func horaires(_ f: Film, _ ac: Int?, _ runtime: Int?) async -> [Pres.Row] {
+        guard !f.tv else { return [] }
+        let h = await get("horaires/\(f.id)" + (ac.map { "/\($0)" } ?? ""), ttl: 900, as: Horaires.self)
+        return h?.rows(runtime) ?? []
+    }
+    func vider() { films = [:]; ready = false }
     /// Numéro AlloCiné : base, films en salles, puis Wikidata
     func allocine(_ f: Film, _ original: String) async -> Int? {
         if let a = films[f.id]?.ac { return a }
@@ -148,9 +196,11 @@ extension Store {
                 if store.s.prevenus.contains(k) { continue }
                 var lieu = v.nom
                 if store.s.zone.favoris, let ac = r.ac {   // l’un de ses cinémas, et pas seulement sa ville
-                    guard let n = try? await AlloCine.shared.pres(ac, v.loc, v.dates.first ?? Jour.cine(.now), runtime: nil) else { actifs.remove(k); continue }
-                    guard let c = n.rows.first(where: { store.isCinema($0.cinema.id) })?.cinema else { actifs.remove(k); continue }
-                    lieu = c.name
+                    lieu = await Registre.shared.horaires(f, ac, nil).first { store.isCinema($0.cinema.id) && Match.plat($0.cinema.city) == Match.plat(v.base) }?.cinema.name ?? ""
+                    if lieu.isEmpty {
+                        guard v.loc > 0, let n = try? await AlloCine.shared.pres(ac, v.loc, v.dates.first ?? Jour.cine(.now), runtime: nil), let c = n.rows.first(where: { store.isCinema($0.cinema.id) })?.cinema else { actifs.remove(k); continue }
+                        lieu = c.name
+                    }
                 }
                 let n = UNMutableNotificationContent()
                 n.title = "\(f.title) ressort au cinéma"
@@ -168,22 +218,39 @@ extension Store {
         }
     }
 }
-struct ZoneView: View {
+struct ZonePicker: View {
     @Environment(Store.self) private var store
     @Environment(Position.self) private var pos
     @State private var pick = false
     var body: some View {
         @Bindable var store = store
+        VStack(alignment: .leading, spacing: 16) {
+            Picker("Surveiller", selection: $store.s.zone.favoris.animation(.snappy)) { Text("Mes cinémas").tag(true); Text("Un périmètre").tag(false) }.pickerStyle(.segmented)
+            if store.s.zone.favoris {
+                Text(store.cinemas.isEmpty ? "Aucun cinéma choisi" : store.cinemas.map(\.name).joined(separator: ", ")).font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 10) {
+                    Button { pick = true } label: { Label(store.s.zone.nom.isEmpty ? "Choisir une ville" : store.s.zone.nom, systemImage: "mappin.and.ellipse").lineLimit(1) }
+                    Button("Ma position", systemImage: "location.fill") { pos.ask(); ici() }
+                }.buttonStyle(.glass).font(.subheadline)
+                Map(position: .constant(cadre), interactionModes: []) {
+                    MapCircle(center: store.s.zone.point, radius: store.s.zone.km * 1000).foregroundStyle(Color.or.opacity(0.22)).stroke(Color.or, lineWidth: 2)
+                }.frame(height: 190).clipShape(.rect(cornerRadius: 18)).allowsHitTesting(false)
+                HStack { Slider(value: $store.s.zone.km, in: 5...150, step: 5); Text("\(Int(store.s.zone.km)) km").font(.headline).monospacedDigit().frame(width: 74, alignment: .trailing) }
+            }
+        }
+        .onChange(of: pos.here?.latitude) { if !store.s.zone.favoris { ici() } }
+        .sheet(isPresented: $pick) { CityPicker { n, c in store.s.zone.nom = n; store.s.zone.lat = c.latitude; store.s.zone.lon = c.longitude } }
+    }
+    private var cadre: MapCameraPosition { .region(MKCoordinateRegion(center: store.s.zone.point, latitudinalMeters: store.s.zone.km * 2500, longitudinalMeters: store.s.zone.km * 2500)) }
+    private func ici() { if let h = pos.here { store.s.zone.nom = "Ma position"; store.s.zone.lat = h.latitude; store.s.zone.lon = h.longitude } }
+}
+struct ZoneView: View {
+    @Environment(Store.self) private var store
+    var body: some View {
+        @Bindable var store = store
         Form {
-            Section {
-                Picker("Surveiller", selection: $store.s.zone.favoris) { Text("Mes cinémas").tag(true); Text("Un périmètre").tag(false) }.pickerStyle(.segmented)
-                if store.s.zone.favoris { Text(store.cinemas.isEmpty ? "Aucun cinéma choisi" : store.cinemas.map(\.name).joined(separator: ", ")).foregroundStyle(.secondary) }
-                else {
-                    Button { pick = true } label: { LabeledContent("Autour de", value: store.s.zone.nom.isEmpty ? "Choisir une ville" : store.s.zone.nom) }
-                    Button("Utiliser ma position", systemImage: "location.fill") { pos.ask(); set() }
-                    VStack(alignment: .leading) { Text("\(Int(store.s.zone.km)) km").font(.headline).monospacedDigit(); Slider(value: $store.s.zone.km, in: 5...150, step: 5) }
-                }
-            } footer: { Text("Tu es prévenu quand un film suivi ressort dans cette zone. L’iPhone vérifie de temps en temps en arrière-plan, et à chaque ouverture de l’app.") }
+            Section { ZonePicker().padding(.vertical, 6) } footer: { Text("Tu es prévenu quand un film suivi ressort dans cette zone. L’iPhone vérifie de temps en temps en arrière-plan, et à chaque ouverture de l’app.") }
             Section("Films suivis (\(store.s.alertes.count))") {
                 if store.s.alertes.isEmpty { Text("Touche la cloche sur la fiche d’un film ancien.").foregroundStyle(.secondary) }
                 ForEach(store.s.alertes) { f in HStack(spacing: 12) { Poster(path: f.poster, title: f.title, width: 40, size: 185); VStack(alignment: .leading) { Text(f.title).font(.headline); Text(f.year).font(.caption).foregroundStyle(.secondary) } } }
@@ -191,10 +258,7 @@ struct ZoneView: View {
             }
         }
         .navigationTitle("Alertes de ressortie").navigationBarTitleDisplayMode(.inline)
-        .onChange(of: pos.here?.latitude) { set() }
-        .sheet(isPresented: $pick) { CityPicker { n, c in store.s.zone.nom = n; store.s.zone.lat = c.latitude; store.s.zone.lon = c.longitude } }
     }
-    private func set() { if let h = pos.here { store.s.zone.nom = "Ma position"; store.s.zone.lat = h.latitude; store.s.zone.lon = h.longitude } }
 }
 struct CityPicker: View {
     let done: (String, CLLocationCoordinate2D) -> Void
@@ -267,12 +331,29 @@ struct FilmSeances: View {
     @State private var auto = true
     @State private var pick = false
     @State private var tout = false
+    @State private var base: [Pres.Row] = []
+    /// Ce que la base connaît ce jour-là autour de la ville choisie
+    private var gardees: [Pres.Row] {
+        let nom = lieu?.base ?? "", p = Salles.villes[Match.plat(nom)] ?? pos.best
+        return base.compactMap { r in
+            let s = r.seances.filter { $0.day == day }
+            guard !s.isEmpty, Match.plat(r.cinema.city) == Match.plat(nom) || Salles.km(r.cinema, p) < 25 else { return nil }
+            return .init(cinema: r.cinema, seances: s)
+        }
+    }
+    private var toutes: [Pres.Row] {
+        rows + gardees.filter { g in !rows.contains { r in
+            if r.cinema.id == g.cinema.id { return true }
+            let a = Match.plat(r.cinema.name), b = Match.plat(g.cinema.name)
+            return Salles.km(r.cinema, .init(latitude: g.cinema.lat, longitude: g.cinema.lon)) < 6 && (a.contains(b) || b.contains(a))
+        } }
+    }
     private var villes: [(Ville, Double)] { Salles.triees(reprise?.lieux ?? [], pos.best) }
     var body: some View {
-        let shown = rows.map { ($0.cinema, garde($0.seances, ver)) }.filter { !$0.1.isEmpty }.sorted { (store.isCinema($0.0.id) ? 0 : 1, Salles.km($0.0, pos.best)) < (store.isCinema($1.0.id) ? 0 : 1, Salles.km($1.0, pos.best)) }
+        let shown = toutes.map { ($0.cinema, garde($0.seances, ver)) }.filter { !$0.1.isEmpty }.sorted { (store.isCinema($0.0.id) ? 0 : 1, Salles.km($0.0, pos.best)) < (store.isCinema($1.0.id) ? 0 : 1, Salles.km($1.0, pos.best)) }
         let known = lieu?.dates ?? []
         VStack(alignment: .leading, spacing: 14) {
-            if looked && ac == nil { CinemasSeances(film: film, original: original) } else {
+            if looked && ac == nil && base.isEmpty && villes.isEmpty { CinemasSeances(film: film, original: original) } else {
                 if !villes.isEmpty { carte }
                 DayStrip(day: Binding { day } set: { auto = false; day = $0 }, only: known.isEmpty ? nil : known)
                 ScrollView(.horizontal) {
@@ -285,15 +366,15 @@ struct FilmSeances: View {
                 HStack(spacing: 8) { Chip(text: "Tout", on: ver.isEmpty) { ver = "" }; Chip(text: "VF", on: ver == "VF") { ver = "VF" }; Chip(text: "VO", on: ver == "VO") { ver = "VO" } }.padding(.horizontal, 18)
                 ForEach(shown, id: \.0.id) { c, s in
                     VStack(alignment: .leading, spacing: 12) {
-                        NavigationLink(value: Route.cinema(c)) { CinemaLine(cinema: c) }.buttonStyle(.plain).padding(.horizontal, 14)
+                        NavigationLink(value: Route.cinema(c)) { CinemaLine(cinema: c) }.buttonStyle(.plain).disabled(c.id.hasPrefix("ind-")).padding(.horizontal, 14)
                         Slots(seances: s, cinema: c, title: film.title, poster: film.poster, filmID: film.id, acID: ac ?? 0)
                     }.padding(.vertical, 14).surface().padding(.horizontal, 18)
                 }
                 if busy { ForEach(0..<2, id: \.self) { _ in RoundedRectangle(cornerRadius: 22).fill(.white.opacity(0.07)).frame(height: 140).modifier(Shimmer()) }.padding(.horizontal, 18) }
-                if let err { Note(text: err, icon: "exclamationmark.triangle") { retry += 1 }.padding(.horizontal, 18) }
+                if let err, shown.isEmpty { Note(text: err, icon: "exclamationmark.triangle") { retry += 1 }.padding(.horizontal, 18) }
                 else if !busy && shown.isEmpty {
                     VStack(spacing: 12) {
-                        Text(rows.isEmpty ? "Aucune séance \(Jour.jolie(day).lowercased()) autour de \(lieu?.nom ?? "toi")" : "Plus de séance dans cette version").font(.subheadline.weight(.semibold)).multilineTextAlignment(.center)
+                        Text(toutes.isEmpty ? "Aucune séance \(Jour.jolie(day).lowercased()) autour de \(lieu?.nom ?? "toi")" : "Plus de séance dans cette version").font(.subheadline.weight(.semibold)).multilineTextAlignment(.center)
                         if let n = next, n > day { Button("Voir \(Jour.jolie(n, long: true).lowercased())") { day = n }.buttonStyle(.glass) }
                     }.frame(maxWidth: .infinity).card().padding(.horizontal, 18)
                 }
@@ -301,10 +382,11 @@ struct FilmSeances: View {
         }
         .task(id: reprise) {
             ac = await Registre.shared.allocine(film, original)
+            base = await Registre.shared.horaires(film, ac, runtime)
             if lieu == nil { if let v = villes.first?.0 { choisir(v) } else { await ici() } }
             looked = true
         }
-        .task(id: "\(ac ?? 0)|\(lieu?.loc ?? 0)|\(day)|\(retry)") { await load() }
+        .task(id: "\(ac ?? 0)|\(lieu?.loc ?? 0)|\(day)|\(retry)|\(looked)") { await load() }
         .sheet(isPresented: $pick) { CityPicker { n, _ in Task { if let i = try? await AlloCine.shared.lieu(n) { auto = true; lieu = Ville(loc: i, nom: n, n: 0, dates: []) } } } }
         .sheet(isPresented: $tout) {
             NavigationStack {
@@ -331,14 +413,15 @@ struct FilmSeances: View {
         do { if let i = try await AlloCine.shared.lieu(n) { lieu = Ville(loc: i, nom: n, n: 0, dates: []) } else { err = "Ville introuvable" } } catch { err = error.localizedDescription; busy = false }
     }
     private func load() async {
-        guard let ac, let v = lieu else { if looked && err == nil && ac != nil { await ici() }; return }
+        guard let ac, var v = lieu else { if looked && err == nil && ac != nil { await ici() } else if looked { busy = false }; return }
         busy = true; err = nil
         defer { if !Task.isCancelled { busy = false } }
         do {
+            if v.loc < 0 { guard let i = try await AlloCine.shared.lieu(v.base) else { return }; v.loc = i }
             var p = try await AlloCine.shared.pres(ac, v.loc, day, runtime: runtime)
             if Task.isCancelled { return }
             // Rien ce jour-là : on saute seul à la prochaine date annoncée
-            if auto, p.rows.allSatisfy({ garde($0.seances, "").isEmpty }), let n = p.next, n > day { auto = false; day = n; return }
+            if auto, gardees.allSatisfy({ garde($0.seances, "").isEmpty }), p.rows.allSatisfy({ garde($0.seances, "").isEmpty }), let n = p.next, n > day { auto = false; day = n; return }
             auto = false
             withAnimation(.snappy) { rows = p.rows; next = p.next }
             var n = 2

@@ -1,3 +1,4 @@
+import UserNotifications
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -203,6 +204,7 @@ struct SettingsView: View {
     @State private var exporting = false
     @State private var restore: Backup?
     @AppStorage("serveur") private var serveur = ""
+    @State private var reset = false
     var body: some View {
         @Bindable var store = store
         Form {
@@ -222,6 +224,7 @@ struct SettingsView: View {
                 Button("Restaurer une sauvegarde") { importing = true }
             } header: { Text("Sauvegarde") } footer: { Text("Le fichier contient tes billets en clair : garde-le en lieu sûr.") }
             Section { Text("Ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB. Catalogue et streaming : JustWatch. Séances : AlloCiné. Ces deux sources sont non officielles, pour un usage personnel.").font(.footnote).foregroundStyle(.secondary) }
+            Section { Button("Réinitialiser l’app", role: .destructive) { Haptic.warn(); reset = true } } footer: { Text("Efface tout, y compris la clé et les billets, puis rouvre l’écran de bienvenue.") }
         }
         .navigationTitle("Réglages").navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $cinemas) { CinemaPicker() }
@@ -231,6 +234,10 @@ struct SettingsView: View {
             let ok = u.startAccessingSecurityScopedResource(); defer { if ok { u.stopAccessingSecurityScopedResource() } }
             if let d = try? Data(contentsOf: u), let b = try? JSONDecoder().decode(Backup.self, from: d) { restore = b } else { Haptic.warn(); store.say("Sauvegarde illisible") }
         }
+        .confirmationDialog("Tout effacer ?", isPresented: $reset, titleVisibility: .visible) {
+            Button("Exporter une sauvegarde d’abord") { if let d = try? JSONEncoder().encode(Backup(saved: store.s, tickets: store.tickets)) { exportFile = BackupFile(data: d); exporting = true } }
+            Button("Tout effacer", role: .destructive) { store.reset() }
+        } message: { Text(store.tickets.isEmpty ? "Listes, notes, cinémas, alertes et clé seront perdus." : "Tes \(store.tickets.count) billets, listes, notes, cinémas, alertes et ta clé seront perdus.") }
         .confirmationDialog("Remplacer tes données par cette sauvegarde ?", isPresented: Binding { restore != nil } set: { if !$0 { restore = nil } }, titleVisibility: .visible, presenting: restore) { b in
             Button("Remplacer", role: .destructive) { store.s = b.saved; store.tickets = b.tickets; store.upcoming.forEach(Rappel.set); Haptic.ok() }
         }
@@ -263,6 +270,7 @@ struct Welcome: View {
     @State private var step = 0
     @State private var cinemas = false
     @State private var pulse = false
+    @State private var notif = false
     var body: some View {
         ZStack {
             MeshGradient(width: 3, height: 3, points: [[0, 0], [0.5, 0], [1, 0], [0, 0.5], [pulse ? 0.7 : 0.3, pulse ? 0.4 : 0.6], [1, 0.5], [0, 1], [0.5, 1], [1, 1]],
@@ -270,23 +278,26 @@ struct Welcome: View {
                 .onAppear { withAnimation(.easeInOut(duration: 5).repeatForever()) { pulse = true } }
             ScrollView {
                 VStack(spacing: 20) {
-                    Image(systemName: ["popcorn.fill", "key.fill", "play.tv.fill", "mappin.and.ellipse"][step]).font(.system(size: 50)).contentTransition(.symbolEffect(.replace)).frame(width: 112, height: 112).glassEffect(.regular, in: .circle)
-                    Text(["Mon Ciné", "Ta clé TMDB", "Tes plateformes", "Tes cinémas"][step]).font(.system(size: 38, weight: .heavy, design: .rounded)).contentTransition(.numericText())
-                    Text(["Tes films, tes séances, tes billets.", "Elle sert aux fiches des films et reste dans le trousseau de ton iPhone.", "Touche celles que tu as : « Regarder » ouvrira directement le film dans leur app.", "Pour voir directement les horaires près de chez toi."][step]).multilineTextAlignment(.center).foregroundStyle(.white.opacity(0.85)).padding(.horizontal, 30)
+                    Image(systemName: ["popcorn.fill", "key.fill", "mappin.and.ellipse", "scope", "play.tv.fill", "bell.badge.fill"][step]).font(.system(size: 50)).contentTransition(.symbolEffect(.replace)).frame(width: 112, height: 112).glassEffect(.regular, in: .circle)
+                    Text(["Mon Ciné", "Ta clé TMDB", "Tes cinémas", "Ton périmètre", "Tes plateformes", "Tes alertes"][step]).font(.system(size: 38, weight: .heavy, design: .rounded)).contentTransition(.numericText())
+                    Text(["Tes films, tes séances, tes billets.", "Elle sert aux fiches des films et reste dans le trousseau de ton iPhone.", "Pour voir directement les horaires près de chez toi.", "Où tu veux être prévenu quand un film ressort au cinéma.", "Touche celles que tu as : « Regarder » ouvrira directement le film ou la série dans leur app.", "Pour tes rappels de séance et les ressorties que tu attends."][step]).multilineTextAlignment(.center).foregroundStyle(.white.opacity(0.85)).padding(.horizontal, 30)
                     if step == 1 { if store.hasKey { Label("Clé enregistrée", systemImage: "checkmark.circle.fill").foregroundStyle(.green) } else { VStack(alignment: .leading, spacing: 16) { KeyField() }.card().padding(.horizontal, 24) } }
-                    if step == 2 { ServicePicker().card().padding(.horizontal, 18) }
-                    if step == 3 { Button("Choisir mes cinémas (\(store.cinemas.count))", systemImage: "plus") { cinemas = true }.buttonStyle(.glass).controlSize(.large) }
+                    if step == 3 { ZonePicker().card().padding(.horizontal, 18) }
+                    if step == 4 { ServicePicker().card().padding(.horizontal, 18) }
+                    if step == 5 { Button(notif ? "Notifications activées" : "Activer les notifications", systemImage: notif ? "checkmark" : "bell.fill") { Task { notif = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false } }.buttonStyle(.glass).controlSize(.large).disabled(notif) }
+                    if step == 2 { Button("Choisir mes cinémas (\(store.cinemas.count))", systemImage: "plus") { cinemas = true }.buttonStyle(.glass).controlSize(.large) }
                 }.padding(.top, 70).padding(.bottom, 30).frame(maxWidth: .infinity)
             }.scrollBounceBehavior(.basedOnSize)
         }
         .safeAreaInset(edge: .bottom) {
-            Button { Haptic.ok(); withAnimation(.bouncy) { next() } } label: { Text(step == 3 || (store.s.onboarded && step == 2) ? "Commencer" : step == 1 && !store.hasKey ? "Plus tard" : "Continuer").font(.headline).frame(maxWidth: .infinity).frame(height: 38).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.white).padding(.horizontal, 24).padding(.bottom, 12)
+            Button { Haptic.ok(); withAnimation(.bouncy) { next() } } label: { Text(step == 5 || (store.s.onboarded && step == 4) ? "Commencer" : step == 1 && !store.hasKey ? "Plus tard" : "Continuer").font(.headline).frame(maxWidth: .infinity).frame(height: 38).foregroundStyle(.black) }.buttonStyle(.glassProminent).tint(.white).padding(.horizontal, 24).padding(.bottom, 12)
         }
-        .onAppear { if store.s.onboarded { step = 2 } }
+        .onAppear { if store.s.onboarded { step = 4 } }
         .sheet(isPresented: $cinemas) { CinemaPicker() }
     }
     private func next() {
-        if step == 2 { store.s.picked = true; if store.s.onboarded { return } }
-        if step < 3 { step += 1 } else { store.s.onboarded = true }
+        if step == 2 { store.s.zone.favoris = !store.cinemas.isEmpty }
+        if step == 4 { store.s.picked = true; if store.s.onboarded { return } }
+        if step < 5 { step += 1 } else { store.s.onboarded = true }
     }
 }

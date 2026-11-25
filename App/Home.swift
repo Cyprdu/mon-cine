@@ -54,7 +54,7 @@ struct Root: View {
             withAnimation(.easeOut(duration: 0.4)) { booted = true }
             await t.value
         }
-        .fullScreenCover(isPresented: Binding { !store.s.onboarded || !store.s.picked } set: { _ in }) { Welcome().environment(store).environment(Position.shared).preferredColorScheme(.dark).tint(.or) }
+        .fullScreenCover(isPresented: Binding { !store.s.onboarded || !store.s.picked } set: { _ in }) { Welcome().onAppear { tab = .home; paths = [:] }.onDisappear { Task { await Accueil.shared.start(store) } }.environment(store).environment(Position.shared).preferredColorScheme(.dark).tint(.or) }
     }
 }
 
@@ -118,6 +118,7 @@ struct RailDef: Identifiable, Hashable {
     var failed = false
     var ready = false
     @ObservationIgnored private var running = false
+    func vider() { hero = []; rails = [:]; titles = [:]; details = [:]; failed = false; ready = false }
     func start(_ store: Store) async {
         guard !running else { return }
         running = true; defer { running = false }
@@ -201,6 +202,7 @@ enum Genre: String, CaseIterable { case tout = "Tout", films = "Films", series =
 struct HomeView: View {
     @State private var genre = Genre.tout
     @State private var remue = 0
+    @State private var colle = false
     @Environment(Store.self) private var store
     private var acc = Accueil.shared
     @State private var current: Int?
@@ -234,9 +236,8 @@ struct HomeView: View {
                 if acc.failed && acc.hero.isEmpty { Note(text: "Connexion impossible. Vérifie Internet puis réessaie.", icon: "wifi.exclamationmark") { Task { await acc.start(store) } }.padding(.horizontal, 18).padding(.top, 110) }
                 else {
                     HeroCarousel(films: une, current: $current, remue: remue).id(genre)
-                        .overlay(alignment: .top) {
-                            GlassEffectContainer(spacing: 8) { HStack(spacing: 8) { ForEach(Genre.allCases, id: \.self) { g in Chip(text: g.rawValue, on: g == genre) { current = nil; genre = g } } } }.padding(.top, 108)
-                        }
+                    HStack(spacing: 8) { ForEach(Genre.allCases, id: \.self) { g in Chip(text: g.rawValue, on: g == genre) { current = nil; genre = g } } }
+                        .frame(maxWidth: .infinity).padding(.top, -10).opacity(colle ? 0 : 1)
                 }
                 LazyVStack(alignment: .leading, spacing: 30) {
                     ForEach(RailDef.all(store).filter(visible)) { RailView(def: $0, genre: genre) }
@@ -246,10 +247,15 @@ struct HomeView: View {
             }
         }
         .onScrollPhaseChange { _, p in if p != .idle { remue += 1 } }
+        .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 560 } action: { _, c in withAnimation(.snappy) { colle = c } }
         .ignoresSafeArea(edges: .top).scrollEdgeEffectHidden(true, for: .top)
         .background { Ambient(path: (acc.hero.first { $0.id == current } ?? acc.hero.first).map { $0.back ?? $0.poster ?? "" }) }
         .toolbar {
+            if colle {
+                ToolbarItem(placement: .topBarLeading) { Picker("Afficher", selection: $genre) { ForEach(Genre.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented).frame(width: 205) }.sharedBackgroundVisibility(.hidden)
+            } else {
             ToolbarItem(placement: .topBarLeading) { Text("Mon Ciné").font(.system(.title2, design: .rounded, weight: .heavy)).fixedSize() }.sharedBackgroundVisibility(.hidden)
+            }
             ToolbarItem(placement: .topBarTrailing) { Button("Surprends-moi", systemImage: "dice.fill") { roll() }.symbolEffect(.bounce, value: dice) }
             ToolbarItem(placement: .topBarTrailing) { NavigationLink(value: Route.settings) { Image(systemName: "gearshape.fill") }.accessibilityLabel("Réglages") }
         }
@@ -300,7 +306,7 @@ struct HeroCarousel: View {
             try? await Task.sleep(for: .seconds(5))
             if Task.isCancelled { return }
             // Cinq secondes sans geste : la bande-annonce muette remplace l’image
-            if Accueil.shared.details[f.id]?.trailer != nil, !ProcessInfo.processInfo.isLowPowerModeEnabled { bande = f.id; try? await Task.sleep(for: .seconds(32)) } else { try? await Task.sleep(for: .seconds(2)) }
+            if Accueil.shared.details[f.id]?.trailer != nil, !ProcessInfo.processInfo.isLowPowerModeEnabled { bande = f.id; try? await Task.sleep(for: .seconds(32)); while Son.shared.on && !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) } } else { try? await Task.sleep(for: .seconds(2)) }
             guard !Task.isCancelled, films.count > 1, let i = films.firstIndex(where: { $0.id == current }) else { return }
             bande = nil
             withAnimation(.smooth(duration: 0.9)) { current = films[(i + 1) % films.count].id }
