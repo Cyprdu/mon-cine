@@ -35,7 +35,16 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
     static let shared = Store()
     var s = Saved() { didSet { save(s, "etat.json") } }
     var tickets: [Ticket] = [] { didSet { save(tickets, "billets.json") } }
-    var toast: String?
+    /// Le message s’efface seul : le minuteur vit ici, pas dans la vue, dont la tâche pouvait être annulée avant la fin
+    var toast: String? { didSet { if toast != nil { effacer() } } }
+    @ObservationIgnored private var minuteur: Task<Void, Never>?
+    private func effacer() {
+        minuteur?.cancel()
+        minuteur = Task { @MainActor [weak self] in
+            guard (try? await Task.sleep(for: .seconds(2.4))) != nil else { return }
+            self?.toast = nil
+        }
+    }
     var pendingFile: URL?
     var hasKey = Trousseau.read()?.isEmpty == false || TMDB.demo
 

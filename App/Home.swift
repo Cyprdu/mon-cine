@@ -42,11 +42,11 @@ struct Root: View {
         .overlay(alignment: .top) {
             if let t = store.toast {
                 Text(t).font(.subheadline.weight(.semibold)).padding(.horizontal, 20).padding(.vertical, 13).glassEffect(.regular, in: .capsule).padding(.top, 6)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .task(id: t) { try? await Task.sleep(for: .seconds(2.4)); if !Task.isCancelled { store.toast = nil } }
+                    .onTapGesture { store.toast = nil }
+                    .transition(.opacity)
             }
         }
-        .animation(.bouncy, value: store.toast)
+        .animation(.easeInOut(duration: 0.25), value: store.toast)
         .overlay { if !booted && store.s.onboarded && tab == .home { Splash().transition(.opacity) } }
         .task {
             let t = Task { await Accueil.shared.start(store) }
