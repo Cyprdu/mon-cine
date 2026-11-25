@@ -8,7 +8,7 @@ struct Ville: Codable, Hashable, Identifiable {
     var loc: Int, nom: String, n: Int, dates: [String]
     var id: Int { loc }
     /// « Paris 5e arrondissement » → « Paris »
-    var base: String { nom.replacing(/ \d+(er|e|ème) arrondissement/, with: "") }
+    var base: String { nom.replacing(/\s\d+(er|e|ème) arrondissement/, with: "") }
 }
 struct Reprise: Codable, Hashable {
     var tmdb: Int?, ac: Int?, titre: String?, sortie: String?, affiche: String?, chaines: [String]?, lu: Int?, villes: [Ville]?
