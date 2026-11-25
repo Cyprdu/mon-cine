@@ -26,6 +26,10 @@ function iso(d) {
   const m = d && d.match(/(\d+)(?:er)? (\S+) (\d{4})/);
   return m && MOIS[m[2]] ? `${m[3]}-${String(MOIS[m[2]]).padStart(2, "0")}-${m[1].padStart(2, "0")}` : "";
 }
+// « (version longue) », « - version restaurée », « Director’s cut »… : la même œuvre sous une autre fiche AlloCiné
+const VERSION = /version (longue|restaur|int[ée]grale|remast|extended|in[ée]dite|noir|r[ée]alisateur|du r[ée]al|originale|4k)|director.?s cut|extended|final cut|remaster|restaur[ée]|anniversaire|anniversary|reprise|ressortie|4k/i;
+export const net = s => s.replace(/[(\[][^)\]]*[)\]]/g, " ").replace(/[\s,:–|-]+(version|director.?s cut|extended|final cut|remaster|restaur|reprise|ressortie|4k|\d+\s*(ans|e anniv|ème anniv|th anniv)).*$/i, " ").replace(/\s+/g, " ").replace(/[\s,:–-]+$/, "").trim();
+export const plat = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/œ/g, "oe").replace(/[^a-z0-9]+/g, " ").trim();
 /** Salles d’une page de département, et s’il existe une page suivante */
 export function salles(h, n) {
   const out = new Map();
@@ -44,10 +48,10 @@ export function seances(h) {
   for (let k = 1; k < c.length; k++) {
     const x = c[k], t = x.match(/meta-title-link"[^>]*cfilm=(\d+)\.html">([^<]+)</);
     if (!t) continue;
-    const heures = [];
+    const heures = [], titre = txt2(t[2]);
     for (const m of x.matchAll(/data-experiences="([^"]*)"[^>]*?data-showtime-time="([^"]{16})/g)) heures.push(m[2] + (m[1].includes("Version.Original") ? "|VO" : m[1].includes("Version.French") ? "|VF" : "|"));
     const i = x.indexOf("meta-body-info"), d = x.slice(i, i + 1200).match(/class="date[^"]*">\s*([^<]+)/), img = x.slice(0, 1200).match(/(?:data-src|src)="(https:\/\/fr\.web\.img[^"]+\.jpg)"/);
-    out.push({ ac: +t[1], titre: txt2(t[2]), sortie: iso(d && d[1]), rep: x.includes("Date de reprise") ? 1 : 0, img: img ? img[1].replace(/\/c_\d+_\d+\//, "/c_310_420/") : null, h: heures });
+    out.push({ ac: +t[1], titre, ver: VERSION.test(titre) ? 1 : 0, sortie: iso(d && d[1]), rep: x.includes("Date de reprise") ? 1 : 0, img: img ? img[1].replace(/\/c_\d+_\d+\//, "/c_310_420/") : null, h: heures });
   }
   return out;
 }
@@ -93,7 +97,7 @@ async function catalogue(e) {
 async function lire(e, f) {
   const h = await page(e, `${AC}${f.ac}/`);
   if (h === null) return;
-  const l = villes(h), st = [e.DB.prepare("update films set lu=? where tmdb=?").bind(now(), f.tmdb)];
+  const l = villes(h), st = [f.alias ? e.DB.prepare("update trouves set lu=? where ac=?").bind(now(), f.ac) : e.DB.prepare("update films set lu=? where tmdb=?").bind(now(), f.tmdb)];
   st.push(e.DB.prepare(l.length ? `delete from villes where ac=? and loc not in (${l.map(x => +x.id).join(",")})` : "delete from villes where ac=?").bind(f.ac));
   for (const x of l) st.push(e.DB.prepare("insert into villes(ac,loc,nom,n) values(?,?,?,?) on conflict(ac,loc) do update set nom=excluded.nom,n=excluded.n").bind(f.ac, x.id, x.nom, x.n));
   await e.DB.batch(st);
@@ -129,7 +133,8 @@ async function salle(e) {
     e.DB.prepare("update salles set lu=?,n=? where id=?").bind(t, dates(h).length, s.id),
     e.DB.prepare("delete from passages where salle=?").bind(s.id),
     e.DB.prepare("insert or replace into passages(salle,ac,jour,h) select ?2,json_extract(value,'$.ac'),?3,json_extract(value,'$.h') from json_each(?1) where json_array_length(value,'$.h')>0").bind(j, s.id, jour),
-    e.DB.prepare("insert into trouves(ac,titre,sortie,affiche,vu) select json_extract(value,'$.ac'),json_extract(value,'$.titre'),json_extract(value,'$.sortie'),json_extract(value,'$.img'),?2 from json_each(?1) where json_extract(value,'$.rep')=1 or (json_extract(value,'$.sortie')<>'' and json_extract(value,'$.sortie')<=?3) on conflict(ac) do update set vu=excluded.vu").bind(j, t, max),
+    e.DB.prepare("insert into trouves(ac,titre,sortie,affiche,vu) select json_extract(value,'$.ac'),json_extract(value,'$.titre'),json_extract(value,'$.sortie'),json_extract(value,'$.img'),?2 from json_each(?1) where json_extract(value,'$.rep')=1 or (json_extract(value,'$.sortie')<>'' and json_extract(value,'$.sortie')<=?3) or json_extract(value,'$.ver')=1 on conflict(ac) do update set vu=excluded.vu").bind(j, t, max),
+    e.DB.prepare("update films set cine=?2 where tmdb in (select t.tmdb from trouves t join json_each(?1) on t.ac=json_extract(value,'$.ac') where t.tmdb is not null)").bind(j, t),
     e.DB.prepare("update films set cine=?2 where ac in (select json_extract(value,'$.ac') from json_each(?1) where json_extract(value,'$.rep')=1 or json_extract(value,'$.sortie')<=?3)").bind(j, t, max),
   ]);
   return true;
@@ -163,6 +168,29 @@ async function sparql(q) {
   const r = await fetch("https://query.wikidata.org/sparql?format=json&query=" + encodeURIComponent(q), { headers: { ...UA, Accept: "application/json" } });
   return r.ok ? (await r.json()).results.bindings : null;
 }
+/** Fiche inconnue de Wikidata : rattachée par son titre, débarrassé de la mention de version */
+async function versions(e, l) {
+  if (!l.length) return;
+  const t = now(), films = (await e.DB.prepare("select tmdb,titre,sortie from films where titre is not null").all()).results, st = [];
+  let essais = 0;
+  for (const f of l) {
+    const n = net(f.titre) || f.titre, k = plat(n), ver = VERSION.test(f.titre) || /[(\[]/.test(f.titre), an = +(f.sortie || "").slice(0, 4);
+    const bon = s => ver || !an || Math.abs(+(s || "").slice(0, 4) - an) <= 1;
+    let c = films.filter(x => plat(x.titre) === k && bon(x.sortie)), id = c.length === 1 ? c[0].tmdb : 0, sortie = f.sortie;
+    if (!id && !c.length && essais < 4) {
+      essais++;
+      const r = await fetch("https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=fr&uselang=fr&type=item&limit=8&search=" + encodeURIComponent(n), { headers: UA });
+      const q = r.ok ? ((await r.json()).search || []).filter(x => plat(x.label) === k || plat(x.match?.text) === k).map(x => x.id).filter(x => /^Q\d+$/.test(x)) : [];
+      const b = q.length ? await sparql(`SELECT ?t (MIN(?d) AS ?s) WHERE { VALUES ?f { ${q.map(x => "wd:" + x).join(" ")} } ?f wdt:P4947 ?t. OPTIONAL { ?f wdt:P577 ?d } } GROUP BY ?t`) : null;
+      const z = (b || []).map(x => ({ tmdb: +x.t.value, sortie: x.s?.value?.slice(0, 10) || "" })).filter(x => bon(x.sortie));
+      if (z.length === 1) { id = z[0].tmdb; sortie = z[0].sortie || sortie; }
+    }
+    if (!id) continue;
+    st.push(e.DB.prepare("update trouves set tmdb=? where ac=?").bind(id, f.ac));
+    st.push(e.DB.prepare("insert into films(tmdb,titre,sortie,affiche,cine) values(?,?,?,?,?) on conflict(tmdb) do update set cine=excluded.cine").bind(id, n, sortie, f.affiche, t));
+  }
+  if (st.length) await e.DB.batch(st);
+}
 /** Films vus dans une salle : numéro TMDB ; films des indépendants : date de sortie */
 async function relier(e) {
   const t = now(), old = new Date().getFullYear() - 2 + "-12-31";
@@ -178,6 +206,7 @@ async function relier(e) {
       st.push(e.DB.prepare("insert into films(tmdb,ac,titre,sortie,affiche,cine,wiki) values(?1,?2,?3,?4,?5,?6,?6) on conflict(tmdb) do update set ac=coalesce(films.ac,excluded.ac),cine=excluded.cine,titre=coalesce(films.titre,excluded.titre),sortie=coalesce(films.sortie,excluded.sortie),affiche=coalesce(films.affiche,excluded.affiche)").bind(id, f.ac, f.titre, f.sortie, f.affiche, t));
     }
     await e.DB.batch(st);
+    await versions(e, a.filter(x => !b.some(y => +y.a.value === x.ac)));
     return true;
   }
   const m = (await e.DB.prepare("select tmdb,titre,affiche from tmeta where sortie is null limit 60").all()).results;
@@ -195,8 +224,9 @@ async function relier(e) {
 }
 async function film(e) {
   const t = now(), f = await e.DB.prepare(`select tmdb,ac from films where ac is not null and ${OK} and (lu is null or lu<?1-172800) order by (lu is not null), lu limit 1`).bind(t).first();
-  if (!f) return false;
-  await lire(e, f);
+  const v = f || await e.DB.prepare("select t.tmdb,t.ac,1 alias from trouves t join films f on f.tmdb=t.tmdb where t.ac<>coalesce(f.ac,0) and t.vu>?1-1209600 and (t.lu is null or t.lu<?1-172800) order by t.lu limit 1").bind(t).first();
+  if (!v) return false;
+  await lire(e, v);
   return true;
 }
 async function ville(e) {
@@ -222,28 +252,28 @@ async function tour(e) {
 }
 /** Réponses composées par la base : le serveur ne décode rien */
 async function ressorties(e) {
-  return (await e.DB.prepare(`with f as (select * from films where ${OK}),
-    v as (select f.tmdb t,json_object('loc',v.loc,'nom',v.nom,'n',v.n,'dates',json((select json_group_array(value) from json_each(coalesce(v.dates,'[]')) where value>=?2))) j from f join villes v on v.ac=f.ac where v.dates is null or exists(select 1 from json_each(v.dates) where value>=?2)),
+  return (await e.DB.prepare(`with f as (select * from films where ${OK}), a as (select tmdb,ac from films where ac is not null union select tmdb,ac from trouves where tmdb is not null),
+    v as (select f.tmdb t,json_object('loc',v.loc,'nom',v.nom,'n',v.n,'dates',json((select json_group_array(value) from json_each(coalesce(v.dates,'[]')) where value>=?2))) j from f join a on a.tmdb=f.tmdb join villes v on v.ac=a.ac where v.dates is null or exists(select 1 from json_each(v.dates) where value>=?2)),
     i as (select tmdb t,json_object('loc',-min(cine),'nom',ville,'n',count(distinct cine),'dates',json_group_array(distinct substr(debut,1,10))) j from ind where tmdb in (select tmdb from f) and debut>=?2 group by tmdb,ville),
     g as (select t,json_group_array(json(j)) l from (select * from v union all select * from i) group by t)
     select json_object('at',?1,'films',json(coalesce(json_group_array(json_object('tmdb',tmdb,'ac',ac,'titre',titre,'sortie',sortie,'affiche',affiche,'chaines',json(coalesce(chaines,'[]')),'lu',coalesce(lu,case when ac is null then cine end),'villes',json(coalesce(g.l,'[]')))),'[]'))) j from f left join g on g.t=f.tmdb`).bind(now(), today()).first()).j;
 }
 async function fiche(e, id) {
-  return (await e.DB.prepare(`select json_object('tmdb',f.tmdb,'ac',f.ac,'titre',f.titre,'sortie',f.sortie,'affiche',f.affiche,'chaines',json(coalesce(chaines,'[]')),'lu',coalesce(lu,case when f.ac is null then cine end),
+  return (await e.DB.prepare(`select json_object('tmdb',f.tmdb,'ac',f.ac,'acs',json((select json_group_array(ac) from trouves where tmdb=f.tmdb and ac<>coalesce(f.ac,0))),'titre',f.titre,'sortie',f.sortie,'affiche',f.affiche,'chaines',json(coalesce(chaines,'[]')),'lu',coalesce(lu,case when f.ac is null then cine end),
     'villes',json((select coalesce(json_group_array(json(j)),'[]') from (
-      select json_object('loc',v.loc,'nom',v.nom,'n',v.n,'dates',json((select json_group_array(value) from json_each(coalesce(v.dates,'[]')) where value>=?2))) j from villes v where v.ac=f.ac and (v.dates is null or exists(select 1 from json_each(v.dates) where value>=?2))
+      select json_object('loc',v.loc,'nom',v.nom,'n',v.n,'dates',json((select json_group_array(value) from json_each(coalesce(v.dates,'[]')) where value>=?2))) j from villes v where v.ac in (select f.ac union select ac from trouves where tmdb=f.tmdb) and (v.dates is null or exists(select 1 from json_each(v.dates) where value>=?2))
       union all select json_object('loc',-min(cine),'nom',ville,'n',count(distinct cine),'dates',json_group_array(distinct substr(debut,1,10))) from ind where tmdb=f.tmdb and debut>=?2 group by ville)))) j from films f where f.tmdb=?1`).bind(id, today()).first())?.j || "{}";
 }
 /** Horaires connus d’un film : salles AlloCiné lues aujourd’hui et indépendants à venir */
 async function horaires(e, id, ac) {
-  return (await e.DB.prepare(`select json_object('salles',json((select coalesce(json_group_array(json_object('id',s.id,'nom',s.nom,'adr',s.adr,'h',json(p.h))),'[]') from passages p join salles s on s.id=p.salle where p.ac=coalesce((select ac from films where tmdb=?1),?3) and p.jour>=date(?2,'-1 day'))),
+  return (await e.DB.prepare(`select json_object('salles',json((select coalesce(json_group_array(json_object('id',s.id,'nom',s.nom,'adr',s.adr,'h',json(p.h))),'[]') from passages p join salles s on s.id=p.salle where p.ac in (select coalesce((select ac from films where tmdb=?1),?3) union select ac from trouves where tmdb=?1) and p.jour>=date(?2,'-1 day'))),
     'ind',json((select coalesce(json_group_array(json_object('id',id,'cine',cine,'nom',nom,'ville',ville,'adr',adr,'lat',lat,'lon',lon,'d',debut,'v',version,'u',url)),'[]') from (select * from ind where tmdb=?1 and debut>=?2 order by debut limit 1500)))) j`).bind(id, today(), ac || -1).first()).j;
 }
 async function suivre(e, ids) {
   ids = [...new Set((Array.isArray(ids) ? ids : []).filter(i => Number.isInteger(i) && i > 0 && i < 1e8))].slice(0, 60);
   if (!ids.length) return;
   const t = now(), n = (await e.DB.prepare("select count(*) n from films where suivi>?").bind(t - 40 * JOUR).first()).n;
-  if (n > 400) return;
+  if (n > 800) return;
   await e.DB.batch(ids.map(i => e.DB.prepare("insert into films(tmdb,suivi) values(?,?) on conflict(tmdb) do update set suivi=excluded.suivi").bind(i, t)));
 }
 export default {

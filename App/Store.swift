@@ -7,6 +7,7 @@ struct Saved: Codable {
     var services: [Provider] = []
     var order: [String] = [], hidden: Set<String> = []
     var alertes: [Film] = [], prevenus: Set<String> = [], episodes: Set<String> = [], zone = Zone()
+    var muets: Set<Int> = [], playlists: [Playlist] = [], tiers: [Tier] = [], meta: [Int: Meta] = [:]
     var onboarded = false, lock = false, picked = false
     init() {}
     init(from d: Decoder) throws {   // un champ absent (ancienne sauvegarde) garde sa valeur par défaut
@@ -26,6 +27,10 @@ struct Saved: Codable {
         prevenus = try c.decodeIfPresent(Set<String>.self, forKey: .prevenus) ?? []
         episodes = try c.decodeIfPresent(Set<String>.self, forKey: .episodes) ?? []
         zone = try c.decodeIfPresent(Zone.self, forKey: .zone) ?? Zone()
+        muets = try c.decodeIfPresent(Set<Int>.self, forKey: .muets) ?? []
+        playlists = try c.decodeIfPresent([Playlist].self, forKey: .playlists) ?? []
+        tiers = try c.decodeIfPresent([Tier].self, forKey: .tiers) ?? []
+        meta = try c.decodeIfPresent([Int: Meta].self, forKey: .meta) ?? [:]
         lock = try c.decodeIfPresent(Bool.self, forKey: .lock) ?? false
     }
 }
@@ -46,6 +51,7 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
         }
     }
     var pendingFile: URL?
+    var ouvrir: Film?
     var hasKey = Trousseau.read()?.isEmpty == false || TMDB.demo
 
     var likes: [Film] { s.likes }
@@ -91,7 +97,7 @@ struct Backup: Codable { var saved: Saved, tickets: [Ticket] }
         if s[keyPath: k].contains(where: { $0.id == f.id }) { s[keyPath: k].removeAll { $0.id == f.id }; return false }
         s[keyPath: k].insert(f, at: 0); return true
     }
-    func like(_ f: Film) { withAnimation(.bouncy) { flip(\.likes, f) ? Haptic.heart() : Haptic.tap() } }
+    func like(_ f: Film) { withAnimation(.bouncy) { if flip(\.likes, f) { Haptic.heart(); s.muets.remove(f.id); if !f.tv && Affiche.old(f) { surveiller(f) } } else { Haptic.tap() } } }
     func later(_ f: Film) { withAnimation(.bouncy) { flip(\.later, f) ? Haptic.ok() : Haptic.tap() } }
     func seen(_ f: Film) { withAnimation(.bouncy) { flip(\.seen, f) ? Haptic.ok() : Haptic.tap() } }
     func rate(_ f: Film, _ stars: Double, _ comment: String = "") {

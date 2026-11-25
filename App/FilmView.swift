@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AVFoundation
 
 struct FilmView: View {
     let film: Film
@@ -15,6 +16,7 @@ struct FilmView: View {
     @State private var rep: Reprise?
     @State private var bande = false
     @State private var tick = 0
+    @State private var saga: [Film] = []
     private var f: Film {   // l’affiche déjà visible est gardée, sans changement à l’arrivée de la fiche
         guard var x = d?.film else { return film }
         x.poster = film.poster ?? x.poster; x.back = film.back ?? x.back
@@ -57,6 +59,12 @@ struct FilmView: View {
                                 RailScroll(spacing: 14) { ForEach(Array((d.directors + d.cast).enumerated()), id: \.offset) { _, p in face(p) } }
                             }
                         }
+                        if let s = d.saga, !saga.isEmpty {
+                            VStack(alignment: .leading, spacing: 12) {
+                                RailHead(title: "La saga " + s.nom, icon: "square.stack.fill", more: .grid(GridQuery(title: s.nom, path: "", films: saga)))
+                                RailScroll { ForEach(saga.filter { $0.id != f.id }) { FilmTile(film: $0, source: "saga-\(f.id)-\($0.id)").railFade() } }
+                            }
+                        }
                         if !d.similar.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
                                 RailHead(title: "Dans le même esprit", icon: "sparkles")
@@ -75,6 +83,8 @@ struct FilmView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { Text(f.title).font(.headline).lineLimit(1).frame(maxWidth: 170).opacity(past ? 1 : 0).animation(.easeOut, value: past) }
+            if Son.shared.visible && bande { ToolbarItem(placement: .topBarTrailing) { BoutonSon() } }
+            ToolbarItem(placement: .topBarTrailing) { MenuPlaylists(film: f) }
             if d?.trailer != nil { ToolbarItem(placement: .topBarTrailing) { Button("Bande-annonce", systemImage: "movieclapper.fill") { Haptic.tap(); stop(); trailer = true } } }
             ToolbarItem(placement: .topBarTrailing) { ShareLink(item: f.web, subject: Text(f.title)) }
         }
@@ -87,6 +97,7 @@ struct FilmView: View {
             try? await Task.sleep(for: .seconds(5))
             if !Task.isCancelled { bande = true }
         }
+        .task(id: d?.saga) { if let s = d?.saga, let l = try? await TMDB.saga(s.id), l.contains(where: { $0.id != film.id }) { withAnimation { saga = l } } }
         .task { if !film.tv { rep = await Registre.shared.reprise(film) } }
         .task { async let a: Void = load(); offers = try? await JustWatch.shared.offers(film); if offers?.isEmpty == true, let o = d?.original, !o.isEmpty { offers = (try? await JustWatch.shared.offers(film, original: o)) ?? [] }; await a }
     }
@@ -103,8 +114,8 @@ struct FilmView: View {
                 .frame(height: 540)
                 .overlay { if bande, let k = d?.trailer { Bande(key: k) } }
                 .clipped()
-                .overlay { LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .clear, location: 0.2), .init(color: .clear, location: 0.45), .init(color: .fond.opacity(0.9), location: 0.92), .init(color: .fond, location: 1)], startPoint: .top, endPoint: .bottom) }
-                .accessibilityHidden(true)
+                .overlay { LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .clear, location: 0.2), .init(color: .clear, location: 0.45), .init(color: .fond.opacity(0.9), location: 0.92), .init(color: .fond, location: 1)], startPoint: .top, endPoint: .bottom).allowsHitTesting(false) }
+                .allowsHitTesting(false).accessibilityHidden(true)
             VStack(spacing: 10) {
                 if reissue { Ressortie() }
                 if let l = d?.logo { Pic(url: TMDB.img(l, 500), mode: .fit) { Text(f.title).font(.largeTitle.bold()) }.frame(maxWidth: 290, maxHeight: 110).shadow(color: .black.opacity(0.5), radius: 10).accessibilityElement().accessibilityLabel(f.title).accessibilityAddTraits(.isHeader) }
@@ -212,32 +223,54 @@ struct YouTube: UIViewRepresentable {
 }
 
 /// Le son choisi vaut pour les bandes-annonces suivantes, jusqu’à la fermeture de l’app
-@MainActor @Observable final class Son { static let shared = Son(); var on = false }
+@MainActor @Observable final class Son {
+    static let shared = Son()
+    var on = false, visible = false
+    @ObservationIgnored weak var web: WKWebView?
+    func basculer() { on.toggle(); appliquer() }
+    /// Commande directe au lecteur, puis vérification : s’il est resté muet ou s’est arrêté, il est relancé avec le son
+    func appliquer() {
+        let s = AVAudioSession.sharedInstance()
+        if on { try? s.setCategory(.playback, mode: .moviePlayback); try? s.setActive(true) }
+        web?.evaluateJavaScript("typeof son==='function'&&son(\(on))")
+        if on {
+            Task { [weak web] in
+                for t in [700, 1800] { try? await Task.sleep(for: .milliseconds(t)); if on { _ = try? await web?.evaluateJavaScript("typeof verif==='function'&&verif();1") } }
+            }
+        } else { try? s.setActive(false, options: .notifyOthersOnDeactivation); try? s.setCategory(.ambient) }
+    }
+    func fin(_ w: WKWebView) {
+        guard web === w else { return }
+        web = nil
+        Task { if self.web == nil || !self.on { self.visible = false } }
+        if on { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+    }
+}
+struct BoutonSon: View {
+    private var son = Son.shared
+    init() {}
+    var body: some View {
+        Button { Haptic.tap(); son.basculer() } label: { Image(systemName: son.on ? "speaker.wave.2.fill" : "speaker.slash.fill").contentTransition(.symbolEffect(.replace)) }.accessibilityLabel(son.on ? "Couper le son" : "Activer le son")
+    }
+}
 /// Bande-annonce sans lecteur ; l’image reste devant tant que la vidéo n’a pas vraiment démarré.
 struct Bande: View {
     let key: String
     @State private var visible = false
-    private var son = Son.shared
-    init(key: String) { self.key = key }
     var body: some View {
         GeometryReader { g in
             // Page rendue en 1920 × 1080 pour que YouTube choisisse la HD, puis mise à l’échelle : remplit tout le cadre, bandes noires du format large comprises
             let k = max(g.size.width / 1920, g.size.height / 1080) * 1.34
-            BandeWeb(key: key, visible: $visible, son: son.on).frame(width: 1920, height: 1080).scaleEffect(k).position(x: g.size.width / 2, y: g.size.height / 2)
+            BandeWeb(key: key, visible: $visible).frame(width: 1920, height: 1080).scaleEffect(k).position(x: g.size.width / 2, y: g.size.height / 2)
                 .allowsHitTesting(false).accessibilityHidden(true)
-            if visible {
-                Button { Haptic.tap(); son.on.toggle() } label: { Image(systemName: son.on ? "speaker.wave.2.fill" : "speaker.slash.fill").font(.subheadline).contentTransition(.symbolEffect(.replace)).frame(width: 40, height: 40) }
-                    .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel(son.on ? "Couper le son" : "Activer le son")
-                    .position(x: g.size.width - 38, y: 138)
-            }
         }
         .clipped().opacity(visible ? 1 : 0).animation(.easeInOut(duration: 0.8), value: visible)
+        .onChange(of: visible) { withAnimation { Son.shared.visible = visible }; if visible && Son.shared.on { Son.shared.appliquer() } }
     }
 }
 struct BandeWeb: UIViewRepresentable {
     let key: String
     @Binding var visible: Bool
-    var son = false
     final class C: NSObject, WKScriptMessageHandler {
         let set: (Bool) -> Void
         init(_ s: @escaping (Bool) -> Void) { set = s }
@@ -250,6 +283,7 @@ struct BandeWeb: UIViewRepresentable {
         c.userContentController.add(context.coordinator, name: "etat")
         let w = WKWebView(frame: .zero, configuration: c)
         w.isOpaque = false; w.backgroundColor = .clear; w.scrollView.isScrollEnabled = false; w.isUserInteractionEnabled = false
+        Son.shared.web = w
         w.scrollView.contentInsetAdjustmentBehavior = .never   // sinon une marge reste en haut, sous l’heure
         w.loadHTMLString("""
         <!doctype html><meta name="viewport" content="width=1920,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="strict-origin-when-cross-origin">
@@ -261,16 +295,19 @@ struct BandeWeb: UIViewRepresentable {
         var P;
         function soustitres(p){try{p.unloadModule('captions');p.unloadModule('cc');p.setOption('captions','track',{})}catch(e){}}
         function son(v){if(P&&P.mute){if(v){P.unMute();P.setVolume(100)}else{P.mute()}}}
+        function verif(){if(!P||!P.isMuted)return;if(P.isMuted()||(P.getPlayerState()!==1&&P.getPlayerState()!==3)){var t=P.getCurrentTime()||4;P.unMute();P.setVolume(100);P.loadVideoById({videoId:'\(key)',startSeconds:t});P.unMute();setTimeout(function(){P.unMute();P.setVolume(100);P.playVideo()},400)}}
         function onYouTubeIframeAPIReady(){P=new YT.Player('p',{width:'100%',height:'100%',videoId:'\(key)',host:'https://www.youtube-nocookie.com',
         playerVars:{autoplay:1,mute:1,controls:0,disablekb:1,fs:0,modestbranding:1,playsinline:1,rel:0,iv_load_policy:3,start:4,origin:'https://fr.cyprdu.moncine'},
         events:{onReady:function(e){e.target.mute();soustitres(e.target);e.target.playVideo()},onApiChange:function(e){soustitres(e.target)},onError:function(){dis('off')},
-        onStateChange:function(e){if(e.data===1){soustitres(e.target)}if(e.data===1&&!vu){vu=true;e.target.setPlaybackQuality('hd1080');setTimeout(function(){son(\(son ? "true" : "false"));dis('on')},2600)}if(e.data===0)dis('off')}}})}
+        onStateChange:function(e){if(e.data===1){soustitres(e.target)}if(e.data===1&&!vu){vu=true;e.target.setPlaybackQuality('hd1080');setTimeout(function(){dis('on')},2600)}if(e.data===0)dis('off')}}})
+        var f=document.getElementById('p');if(f&&f.setAttribute)f.setAttribute('allow','autoplay; encrypted-media; picture-in-picture')}
         </script>
         """, baseURL: URL(string: "https://fr.cyprdu.moncine")!)
         return w
     }
-    func updateUIView(_ w: WKWebView, context: Context) { w.evaluateJavaScript("typeof son==='function'&&vu&&son(\(son))") }
+    func updateUIView(_ w: WKWebView, context: Context) {}
     static func dismantleUIView(_ w: WKWebView, coordinator: C) {
+        Son.shared.fin(w)
         w.configuration.userContentController.removeScriptMessageHandler(forName: "etat")
         w.loadHTMLString("", baseURL: nil)
     }

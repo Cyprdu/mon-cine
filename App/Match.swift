@@ -15,9 +15,9 @@ enum Match {
     private static func sub(_ s: String, _ re: String, _ by: String = " ") -> String { s.replacingOccurrences(of: re, with: by, options: [.regularExpression, .caseInsensitive]) }
     static func net(_ t: String) -> String {
         var s = sub(t, "[(\\[][^)\\]]*[)\\]]")
-        s = sub(s, "\\s[-–|]\\s*(version|vo|vf|vost\\w*|4k|imax|reprise|ressortie|cin[ée].?club|restaur\\S*|\\d+\\s*ans).*$")
-        s = sub(s, "\\b(version (longue|restaur\\S*|int[ée]grale)|4k|vostf?r?|imax|director.?s cut|\\d+(e|ème|th)? anni\\S*)\\b")
-        return sub(sub(s, "\\s+"), "[\\s:–-]+$", "").trimmingCharacters(in: .whitespaces)
+        s = sub(s, "(\\s[-–|]|[,:])\\s*(version|vo|vf|vost\\w*|4k|imax|reprise|ressortie|cin[ée].?club|restaur\\S*|\\d+\\s*ans).*$")
+        s = sub(s, "\\b(version (longue|restaur\\S*|int[ée]grale|remast\\S*|in[ée]dite)|final cut|4k|vostf?r?|imax|director.?s cut|\\d+(e|ème|th)? anni\\S*)\\b")
+        return sub(sub(s, "\\s+"), "[\\s,:–-]+$", "").trimmingCharacters(in: .whitespaces)
     }
     private static func parts(_ t: String) -> [String] {
         sub(t, "\\s*[:–—]\\s*|\\s+-\\s+", "\u{1}").split(separator: "\u{1}").map(String.init)
@@ -41,10 +41,20 @@ enum Match {
         }
         return false
     }
+    /// Autre version d’une œuvre déjà connue : sa fiche AlloCiné porte souvent une autre année
+    static func version(_ t: String) -> Bool {
+        plat(t).range(of: "\\b(version (longue|restaure\\w*|integrale|remast\\w*|inedite|extended|noir et blanc|du realisateur)|directors? cut|director s cut|extended|final cut|remaster\\w*|restaure\\w*|anniversaire|anniversary|reprise|ressortie|4k|\\d+ ans)\\b", options: .regularExpression) != nil
+    }
+    /// Titre simplifié, puis sous-titre seul pour « Saga, sous-titre »
+    static func variantes(_ t: String) -> [String] {
+        let n = net(t).isEmpty ? t : net(t)
+        let p = sub(n, "\\s*[:–—,]\\s*|\\s+-\\s+", "\u{1}").split(separator: "\u{1}").map(String.init)
+        return [n] + (p.count > 1 && mots(p[p.count - 1]).count >= 2 ? [p[p.count - 1]] : [])
+    }
     /// Même titre, et sortie à un an près d’une année connue d’AlloCiné.
     static func same(title: String, original: String, year: Int?, _ f: ACFilm) -> Bool {
         guard same([title, original], [f.title, f.original]) else { return false }
-        guard let year, !f.years.isEmpty else { return true }
+        guard let year, !f.years.isEmpty, !version(f.title) else { return true }
         return f.years.contains { abs($0 - year) <= 1 }
     }
 }

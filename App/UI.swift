@@ -25,7 +25,7 @@ import CoreHaptics
 }
 
 // MARK: Navigation
-enum Route: Hashable { case film(Film, String), cinema(Cinema), person(Person), grid(GridQuery), settings }
+enum Route: Hashable { case film(Film, String), cinema(Cinema), person(Person), grid(GridQuery), settings, playlist(String), tier(String) }
 struct GridQuery: Hashable { var title: String, path: String, params: [String: String] = [:], films: [Film]? = nil }
 extension EnvironmentValues { @Entry var zoomNS: Namespace.ID? }
 
@@ -43,6 +43,8 @@ struct Pile<Content: View>: View {
                     case .person(let p): PersonView(person: p)
                     case .grid(let g): GridScreen(q: g)
                     case .settings: SettingsView()
+                    case .playlist(let i): PlaylistView(id: i)
+                    case .tier(let i): TierView(id: i)
                     }
                 }.environment(\.zoomNS, ns)
             }
@@ -250,6 +252,7 @@ struct FilmTile: View {
             Button(store.liked(film.id) ? "Retirer des favoris" : "J’aime", systemImage: store.liked(film.id) ? "heart.slash" : "heart") { store.like(film) }
             Button(store.isLater(film.id) ? "Retirer de « À voir »" : "À voir", systemImage: "bookmark") { store.later(film) }
             Button(store.isSeen(film.id) ? "Marquer non vu" : "Déjà vu", systemImage: "eye") { store.seen(film) }
+            MenuPlaylists(film: film)
             ShareLink(item: film.web) { Label("Partager", systemImage: "square.and.arrow.up") }
         } preview: { Poster(path: film.poster, title: film.title, width: 260, size: 500) }
     }

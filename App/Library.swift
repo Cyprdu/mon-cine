@@ -4,11 +4,12 @@ import UniformTypeIdentifiers
 
 // MARK: Ma liste
 struct LibraryView: View {
-    enum Part: String, CaseIterable { case likes = "J’aime", later = "À voir", rated = "Notés", seen = "Vus", alertes = "Alertes", agenda = "Séances" }
+    enum Part: String, CaseIterable { case likes = "J’aime", later = "À voir", rated = "Notés", seen = "Vus", playlists = "Playlists", tiers = "Tier lists", alertes = "Alertes", agenda = "Séances" }
     @Environment(Store.self) private var store
     @State private var part = Part.likes
+    @State private var filtre = Filtre()
     private var films: [Film] {
-        switch part { case .likes: store.likes; case .later: store.s.later; case .rated: store.rated.map(\.film); case .seen: store.s.seen; case .alertes: store.s.alertes; case .agenda: [] }
+        switch part { case .likes: store.likes; case .later: store.s.later; case .rated: store.rated.map(\.film); case .seen: store.s.seen; case .alertes: store.suivis; case .agenda, .playlists, .tiers: [] }
     }
     var body: some View {
         ScrollView {
@@ -22,7 +23,7 @@ struct LibraryView: View {
                     let l = store.s.agenda.sorted { $0.start > $1.start }
                     if l.isEmpty { empty("Aucune séance enregistrée") }
                     LazyVStack(spacing: 12) { ForEach(l) { AgendaCard(item: $0).opacity($0.past ? 0.6 : 1) } }.padding(.horizontal, 18)
-                } else if part == .rated {
+                } else if part == .playlists { PlaylistsView() } else if part == .tiers { TiersView() } else if part == .rated && filtre == Filtre() {
                     if films.isEmpty { empty("Note un film depuis sa fiche") }
                     LazyVStack(spacing: 12) {
                         ForEach(store.rated, id: \.film.id) { r in
@@ -40,12 +41,17 @@ struct LibraryView: View {
                         }
                     }.padding(.horizontal, 18)
                 } else {
-                    if films.isEmpty { empty(part == .likes ? "Touche le cœur d’un film pour le retrouver ici" : part == .later ? "Garde ici les films à voir" : part == .alertes ? "Touche la cloche d’un film ancien pour être prévenu de sa ressortie" : "Les films vus apparaîtront ici") }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 12)], spacing: 18) { ForEach(films) { FilmTile(film: $0, source: "l-\(part.rawValue)-\($0.id)", width: nil).transition(.scale.combined(with: .opacity)) } }.padding(.horizontal, 18)
+                    if films.isEmpty { empty(part == .likes ? "Touche le cœur d’un film pour le retrouver ici" : part == .later ? "Garde ici les films à voir" : part == .alertes ? "Mets un cœur à un film ancien pour être prévenu de sa ressortie" : "Les films vus apparaîtront ici") }
+                    if part == .likes || part == .later || part == .seen {
+                        ScrollView(.horizontal) { HStack(spacing: 8) { ForEach(Filtre.Groupe.allCases, id: \.self) { g in Chip(text: g.rawValue, on: filtre.groupe == g) { filtre.groupe = g } } }.padding(.horizontal, 18) }.scrollIndicators(.hidden).scrollClipDisabled()
+                    }
+                    GrilleFilms(films: films, source: "l-\(part.rawValue)", filtre: filtre)
                 }
             }.padding(.vertical, 12)
         }
         .background(Ambient(path: films.first?.back ?? films.first?.poster)).navigationTitle("Ma liste")
+        .toolbar { if ![.agenda, .playlists, .tiers].contains(part) { ToolbarItem(placement: .topBarTrailing) { FiltreMenu(f: $filtre, films: films) } } }
+        .task(id: part == .tiers) { if part == .tiers { await Metas.lire(store.likes + store.s.seen, store) } }
     }
     private func stat(_ v: String, _ t: String, _ i: String) -> some View {
         VStack(spacing: 4) { Image(systemName: i).foregroundStyle(Color.or); Text(v).font(.system(.title2, design: .rounded, weight: .heavy)).contentTransition(.numericText()); Text(t).font(.caption2).foregroundStyle(.secondary) }

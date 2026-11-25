@@ -12,11 +12,17 @@ struct Ville: Codable, Hashable, Identifiable {
     var base: String { nom.replacing(/\s\d+(er|e|ème) arrondissement/, with: "") }
 }
 struct Reprise: Codable, Hashable {
-    var tmdb: Int?, ac: Int?, titre: String?, sortie: String?, affiche: String?, chaines: [String]?, lu: Int?, villes: [Ville]?
+    var tmdb: Int?, ac: Int?, acs: [Int]?, titre: String?, sortie: String?, affiche: String?, chaines: [String]?, lu: Int?, villes: [Ville]?
     /// Arrondissements regroupés sous leur ville, sans les dates passées
     var lieux: [Ville] {
         let t = Jour.cine(.now)
-        let l = (villes ?? []).map { v -> Ville in var v = v; v.dates = v.dates.filter { $0 >= t }; return v }
+        var parLoc: [Int: Ville] = [:]   // version longue et version normale : mêmes villes réunies
+        for v in villes ?? [] {
+            var v = v; v.dates = v.dates.filter { $0 >= t }
+            if let o = parLoc[v.loc] { v.n = max(v.n, o.n); v.dates = v.dates.isEmpty || o.dates.isEmpty ? [] : Array(Set(v.dates + o.dates)) }
+            parLoc[v.loc] = v
+        }
+        let l = Array(parLoc.values)
         let noms = Set(l.map(\.nom))
         var out: [Ville] = []
         for v in l.filter({ $0.base == $0.nom || !noms.contains($0.base) }).sorted(by: { $0.loc > $1.loc }) {   // numéro négatif : indépendants
@@ -49,7 +55,7 @@ struct Horaires: Codable {
                 return Seance(id: "b-" + s.id + x, start: d, end: Self.fin(d, runtime), version: p.count > 1 && p[1] == "VO" ? "VOST" : "VF", formats: [], url: nil, label: "")
             }
             let c = Salles.parID[s.id] ?? Cinema(id: s.id, name: s.nom ?? "Cinéma", address: s.adr ?? "", lat: 46.6, lon: 2.4)
-            if !l.isEmpty { out.append(.init(cinema: c, seances: l)) }
+            if !l.isEmpty { out = Pres.fusion(out, [.init(cinema: c, seances: l)]) }
         }
         for (_, g) in Dictionary(grouping: ind, by: \.cine) {
             let c = Self.cinema(g[0])
@@ -162,12 +168,21 @@ extension Store {
         if s.zone.favoris { return cinemas.contains { Match.plat($0.city) == Match.plat(v.base) || Salles.km(v.base, .init(latitude: $0.lat, longitude: $0.lon)) < 4 } }
         return Salles.km(v.base, s.zone.point) <= s.zone.km
     }
-    func alerte(_ id: Int) -> Bool { s.alertes.contains { $0.id == id } }
+    /// Films suivis : la cloche, et tous les coups de cœur assez anciens pour ressortir
+    var suivis: [Film] {
+        var vus = Set<Int>()
+        return (s.alertes + s.likes.filter { !$0.tv && Affiche.old($0) && !s.muets.contains($0.id) }).filter { vus.insert($0.id).inserted }
+    }
+    func alerte(_ id: Int) -> Bool { s.alertes.contains { $0.id == id } || (liked(id) && !s.muets.contains(id)) }
     func alerter(_ f: Film) {
-        if alerte(f.id) { withAnimation(.bouncy) { s.alertes.removeAll { $0.id == f.id } }; Haptic.tap(); return }
-        withAnimation(.bouncy) { s.alertes.insert(f, at: 0) }
+        if alerte(f.id) { withAnimation(.bouncy) { s.alertes.removeAll { $0.id == f.id }; if liked(f.id) { s.muets.insert(f.id) } }; Haptic.tap(); return }
+        withAnimation(.bouncy) { s.muets.remove(f.id); if !liked(f.id) { s.alertes.insert(f, at: 0) } }
         Haptic.ok()
         say(s.zone.favoris && cinemas.isEmpty ? "Choisis ta zone dans les réglages" : "Tu seras prévenu de sa ressortie")
+        surveiller(f)
+    }
+    func surveiller(_ f: Film) {
+        guard !TMDB.demo else { return }
         Task {
             _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
             await Registre.shared.suivre([f.id])
@@ -175,46 +190,76 @@ extension Store {
         }
     }
 }
+/// Montre les notifications même app ouverte ; un toucher ouvre la fiche
+final class Avis: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = Avis()
+    func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification) async -> UNNotificationPresentationOptions { [.banner, .list, .sound] }
+    func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse) async {
+        let i = r.notification.request.content.userInfo["film"] as? Int
+        await MainActor.run { if let i, let f = Store.shared.suivis.first(where: { $0.id == i }) { Store.shared.ouvrir = f } }
+    }
+}
 @MainActor enum Veille {
     nonisolated static let id = "fr.cyprdu.moncine.veille"
     static func planifier() {
-        guard !Store.shared.s.alertes.isEmpty else { return }
+        guard !Store.shared.suivis.isEmpty else { return }
         let r = BGAppRefreshTaskRequest(identifier: id)
         r.earliestBeginDate = .now.addingTimeInterval(4 * 3600)
         try? BGTaskScheduler.shared.submit(r)
     }
+    private static var enCours = false
+    private(set) static var derniere = Date.distantPast
     static func run(_ store: Store) async {
-        guard !TMDB.demo, !store.s.alertes.isEmpty else { return }
-        await Registre.shared.suivre(Array(store.s.alertes.map(\.id).prefix(60)))
+        let suivis = store.suivis
+        guard !TMDB.demo, !enCours, !suivis.isEmpty else { return }
+        enCours = true; derniere = .now; defer { enCours = false }
+        let ids = suivis.map(\.id)
+        for i in stride(from: 0, to: min(ids.count, 600), by: 60) { await Registre.shared.suivre(Array(ids[i..<min(i + 60, ids.count)])) }
         await Registre.shared.load(fresh: true)
-        var actifs = Set<String>()
-        for f in store.s.alertes {
+        var actifs = Set<String>(), neufs: [(film: Film, lieux: [String], date: String?)] = []
+        for f in suivis {
             guard let r = Registre.shared.films[f.id] else { continue }
+            var lieux: [String] = [], date: String?
             for v in r.lieux where store.dansZone(v) {
                 let k = "\(f.id)|\(v.loc)"
                 actifs.insert(k)
                 if store.s.prevenus.contains(k) { continue }
                 var lieu = v.nom
-                if store.s.zone.favoris, let ac = r.ac {   // l’un de ses cinémas, et pas seulement sa ville
-                    lieu = await Registre.shared.horaires(f, ac, nil).first { store.isCinema($0.cinema.id) && Match.plat($0.cinema.city) == Match.plat(v.base) }?.cinema.name ?? ""
-                    if lieu.isEmpty {
-                        guard v.loc > 0, let n = try? await AlloCine.shared.pres(ac, v.loc, v.dates.first ?? Jour.cine(.now), runtime: nil), let c = n.rows.first(where: { store.isCinema($0.cinema.id) })?.cinema else { actifs.remove(k); continue }
-                        lieu = c.name
+                let acs = ([r.ac].compactMap { $0 } + (r.acs ?? [])).prefix(3)
+                if store.s.zone.favoris, !acs.isEmpty {   // l’un de ses cinémas, et pas seulement sa ville
+                    lieu = await Registre.shared.horaires(f, r.ac, nil).first { store.isCinema($0.cinema.id) && Match.plat($0.cinema.city) == Match.plat(v.base) }?.cinema.name ?? ""
+                    if lieu.isEmpty, v.loc > 0 {
+                        for ac in acs where lieu.isEmpty {
+                            lieu = (try? await AlloCine.shared.pres(ac, v.loc, v.dates.first ?? Jour.cine(.now), runtime: nil))?.rows.first { store.isCinema($0.cinema.id) }?.cinema.name ?? ""
+                        }
                     }
+                    if lieu.isEmpty { actifs.remove(k); continue }
                 }
-                let n = UNMutableNotificationContent()
-                n.title = "\(f.title) ressort au cinéma"
-                n.body = lieu + (v.dates.first.map { ", " + Jour.jolie($0, long: true).lowercased() } ?? "")
-                n.sound = .default
-                try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "ressortie-" + k, content: n, trigger: nil))
-                store.s.prevenus.insert(k)
+                lieux.append(lieu); store.s.prevenus.insert(k)
+                if let d = v.dates.first { date = min(date ?? d, d) }
             }
+            if !lieux.isEmpty { neufs.append((f, lieux, date)) }
         }
+        await prevenir(neufs)
         // Ville quittée : une prochaine ressortie préviendra de nouveau
         if Registre.shared.ready {
-            let ids = Set(store.s.alertes.map(\.id))
+            let ids = Set(suivis.map(\.id))
             let garde = store.s.prevenus.filter { k in actifs.contains(k) || !(Int(k.split(separator: "|").first ?? "").map { ids.contains($0) && Registre.shared.films[$0]?.lu != nil } ?? false) }
             if garde != store.s.prevenus { store.s.prevenus = garde }
+        }
+    }
+    /// Une notification par film, ou une seule quand beaucoup ressortent d’un coup
+    private static func prevenir(_ l: [(film: Film, lieux: [String], date: String?)]) async {
+        func envoyer(_ id: String, _ titre: String, _ texte: String, _ film: Int?) async {
+            let n = UNMutableNotificationContent()
+            n.title = titre; n.body = texte; n.sound = .default
+            if let film { n.userInfo = ["film": film] }
+            try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: n, trigger: nil))
+        }
+        if l.count > 4 {
+            await envoyer("ressorties", "\(l.count) films que tu suis sont au cinéma", l.prefix(8).map(\.film.title).joined(separator: ", ") + (l.count > 8 ? "…" : ""), nil)
+        } else {
+            for x in l { await envoyer("ressortie-\(x.film.id)", "\(x.film.title) ressort au cinéma", Array(Set(x.lieux)).sorted().prefix(3).joined(separator: ", ") + (x.date.map { ", " + Jour.jolie($0, long: true).lowercased() } ?? ""), x.film.id) }
         }
     }
 }
@@ -251,11 +296,11 @@ struct ZoneView: View {
         @Bindable var store = store
         Form {
             Section { ZonePicker().padding(.vertical, 6) } footer: { Text("Tu es prévenu quand un film suivi ressort dans cette zone. L’iPhone vérifie de temps en temps en arrière-plan, et à chaque ouverture de l’app.") }
-            Section("Films suivis (\(store.s.alertes.count))") {
-                if store.s.alertes.isEmpty { Text("Touche la cloche sur la fiche d’un film ancien.").foregroundStyle(.secondary) }
-                ForEach(store.s.alertes) { f in HStack(spacing: 12) { Poster(path: f.poster, title: f.title, width: 40, size: 185); VStack(alignment: .leading) { Text(f.title).font(.headline); Text(f.year).font(.caption).foregroundStyle(.secondary) } } }
-                    .onDelete { store.s.alertes.remove(atOffsets: $0) }
-            }
+            Section {
+                if store.suivis.isEmpty { Text("Mets un cœur à un film, ou touche la cloche sur sa fiche.").foregroundStyle(.secondary) }
+                ForEach(store.suivis) { f in HStack(spacing: 12) { Poster(path: f.poster, title: f.title, width: 40, size: 185); VStack(alignment: .leading) { Text(f.title).font(.headline); Text(f.year).font(.caption).foregroundStyle(.secondary) } } }
+                    .onDelete { a in let l = store.suivis; for i in a { store.alerter(l[i]) } }
+            } header: { Text("Films suivis (\(store.suivis.count))") } footer: { Text("Tes coups de cœur sont suivis tout seuls. Glisse vers la gauche pour en retirer un des alertes.") }
         }
         .navigationTitle("Alertes de ressortie").navigationBarTitleDisplayMode(.inline)
     }
@@ -279,6 +324,16 @@ struct CityPicker: View {
 struct Pres: Codable {
     struct Row: Codable, Hashable { var cinema: Cinema, seances: [Seance] }
     var rows: [Row] = [], next: String?, pages = 1, at = Date.now
+    /// Même cinéma dans les deux listes : séances réunies
+    static func fusion(_ a: [Row], _ b: [Row]) -> [Row] {
+        var out = a
+        for r in b {
+            if let i = out.firstIndex(where: { $0.cinema.id == r.cinema.id }) {
+                out[i].seances = (out[i].seances + r.seances.filter { s in !out[i].seances.contains { $0.id == s.id || ($0.start == s.start && $0.version.prefix(2) == s.version.prefix(2)) } }).sorted { $0.start < $1.start }
+            } else { out.append(r) }
+        }
+        return out
+    }
 }
 extension AlloCine {
     func pres(_ movie: Int, _ loc: Int, _ day: String, page n: Int = 1, runtime: Int?) async throws -> Pres {
@@ -301,6 +356,24 @@ extension AlloCine {
         }
         if let d = try? JSONEncoder().encode(out) { Disk.write(key, d) }
         return out
+    }
+    /// Villes où un film passe, lues sur sa page publique
+    func villes(_ movie: Int) async -> [Ville] {
+        let key = "acv:\(movie)"
+        if let o = Disk.read(key), o.age < 12 * 3600, let l = try? JSONDecoder().decode([Ville].self, from: o.data) { return l }
+        guard !TMDB.demo, pauseFinie, let u = URL(string: "https://www.allocine.fr/seance/film-\(movie)/") else { return [] }
+        var r = URLRequest(url: u, timeoutInterval: 14)
+        r.setValue("mon-cine-perso/1.0", forHTTPHeaderField: "User-Agent")
+        guard let (d, res) = try? await URLSession.shared.data(for: r), (res as? HTTPURLResponse)?.statusCode == 200, let h = String(data: d, encoding: .utf8) else { return [] }
+        var out: [Int: Ville] = [:]
+        for m in h.matches(of: /data-localization="([^"]+)"[^>]*>\s*[^<]*<span class="light">\((\d+)\)/) {
+            let t = String(m.1).replacingOccurrences(of: "&quot;", with: "\"").replacingOccurrences(of: "&#039;", with: "'").replacingOccurrences(of: "&amp;", with: "&")
+            guard let j = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? J, let i = j["id"] as? Int, let n = j["value"] as? String else { continue }
+            out[i] = Ville(loc: i, nom: n, n: Int(m.2) ?? 1, dates: [])
+        }
+        let l = Array(out.values)
+        if let d = try? JSONEncoder().encode(l) { Disk.write(key, d) }
+        return l
     }
     func lieu(_ nom: String) async throws -> Int? {
         let key = "acl:" + nom
@@ -332,6 +405,13 @@ struct FilmSeances: View {
     @State private var pick = false
     @State private var tout = false
     @State private var base: [Pres.Row] = []
+    @State private var sup: [Ville] = []
+    private var ancien: Bool { Affiche.old(film) }
+    /// Fiche AlloCiné du film, puis celles de ses autres versions
+    private var acs: [Int] {
+        var vus = Set<Int>()
+        return ([ac].compactMap { $0 } + (reprise?.acs ?? []) + Alias.lire(film.id)).filter { vus.insert($0).inserted }
+    }
     /// Ce que la base connaît ce jour-là autour de la ville choisie
     private var gardees: [Pres.Row] {
         let nom = lieu?.base ?? "", p = Salles.villes[Match.plat(nom)] ?? pos.best
@@ -348,12 +428,12 @@ struct FilmSeances: View {
             return Salles.km(r.cinema, .init(latitude: g.cinema.lat, longitude: g.cinema.lon)) < 6 && (a.contains(b) || b.contains(a))
         } }
     }
-    private var villes: [(Ville, Double)] { Salles.triees(reprise?.lieux ?? [], pos.best) }
+    private var villes: [(Ville, Double)] { Salles.triees((reprise?.lieux).flatMap { $0.isEmpty ? nil : $0 } ?? sup, pos.best) }
     var body: some View {
         let shown = toutes.map { ($0.cinema, garde($0.seances, ver)) }.filter { !$0.1.isEmpty }.sorted { (store.isCinema($0.0.id) ? 0 : 1, Salles.km($0.0, pos.best)) < (store.isCinema($1.0.id) ? 0 : 1, Salles.km($1.0, pos.best)) }
         let known = lieu?.dates ?? []
         VStack(alignment: .leading, spacing: 14) {
-            if looked && ac == nil && base.isEmpty && villes.isEmpty { CinemasSeances(film: film, original: original) } else {
+            if looked && acs.isEmpty && base.isEmpty && villes.isEmpty { CinemasSeances(film: film, original: original) } else {
                 if !villes.isEmpty { carte }
                 DayStrip(day: Binding { day } set: { auto = false; day = $0 }, only: known.isEmpty ? nil : known)
                 ScrollView(.horizontal) {
@@ -378,15 +458,17 @@ struct FilmSeances: View {
                         if let n = next, n > day { Button("Voir \(Jour.jolie(n, long: true).lowercased())") { day = n }.buttonStyle(.glass) }
                     }.frame(maxWidth: .infinity).card().padding(.horizontal, 18)
                 }
+                if ancien && looked && !(villes.isEmpty && base.isEmpty) { LieuxRessortie(film: film, acs: acs, runtime: runtime, base: base, villes: villes, pres: !shown.isEmpty) }
             }
         }
         .task(id: reprise) {
             ac = await Registre.shared.allocine(film, original)
             base = await Registre.shared.horaires(film, ac, runtime)
+            if ancien, reprise?.lieux.isEmpty ?? true, let a = acs.first { sup = Reprise(villes: await AlloCine.shared.villes(a)).lieux }
             if lieu == nil { if let v = villes.first?.0 { choisir(v) } else { await ici() } }
             looked = true
         }
-        .task(id: "\(ac ?? 0)|\(lieu?.loc ?? 0)|\(day)|\(retry)|\(looked)") { await load() }
+        .task(id: "\(acs)|\(lieu?.loc ?? 0)|\(day)|\(retry)|\(looked)") { await load() }
         .sheet(isPresented: $pick) { CityPicker { n, _ in Task { if let i = try? await AlloCine.shared.lieu(n) { auto = true; lieu = Ville(loc: i, nom: n, n: 0, dates: []) } } } }
         .sheet(isPresented: $tout) {
             NavigationStack {
@@ -413,25 +495,123 @@ struct FilmSeances: View {
         do { if let i = try await AlloCine.shared.lieu(n) { lieu = Ville(loc: i, nom: n, n: 0, dates: []) } else { err = "Ville introuvable" } } catch { err = error.localizedDescription; busy = false }
     }
     private func load() async {
-        guard let ac, var v = lieu else { if looked && err == nil && ac != nil { await ici() } else if looked { busy = false }; return }
+        guard !acs.isEmpty, var v = lieu else { if looked && err == nil && !acs.isEmpty { await ici() } else if looked { busy = false }; return }
         busy = true; err = nil
         defer { if !Task.isCancelled { busy = false } }
         do {
-            if v.loc < 0 { guard let i = try await AlloCine.shared.lieu(v.base) else { return }; v.loc = i }
-            var p = try await AlloCine.shared.pres(ac, v.loc, day, runtime: runtime)
-            if Task.isCancelled { return }
-            // Rien ce jour-là : on saute seul à la prochaine date annoncée
-            if auto, gardees.allSatisfy({ garde($0.seances, "").isEmpty }), p.rows.allSatisfy({ garde($0.seances, "").isEmpty }), let n = p.next, n > day { auto = false; day = n; return }
-            auto = false
-            withAnimation(.snappy) { rows = p.rows; next = p.next }
-            var n = 2
-            while n <= min(p.pages, 4) {
-                let total = p.pages
-                p = try await AlloCine.shared.pres(ac, v.loc, day, page: n, runtime: runtime)
+            // Ses cinémas d’abord : une version longue y porte parfois une autre fiche
+            var deja: [Pres.Row] = []
+            if ancien {
+                for c in store.cinemas.prefix(3) where Match.plat(c.city) == Match.plat(v.base) || Salles.km(v.base, .init(latitude: c.lat, longitude: c.lon)) < 25 {
+                    for f in (try? await AlloCine.shared.programme(c.id, day))?.films ?? [] where Match.same(title: film.title, original: original, year: Int(film.year), f) {
+                        let longue = Match.plat(f.title).contains("version longue")
+                        if longue { Alias.noter(film.id, f.movie) }
+                        deja = Pres.fusion(deja, [.init(cinema: c, seances: f.seances.map { var s = $0; if longue && s.label.isEmpty { s.label = "Version longue" }; return s })])
+                    }
+                }
                 if Task.isCancelled { return }
-                rows += p.rows.filter { r in !rows.contains { $0.cinema.id == r.cinema.id } }
-                p.pages = total; n += 1
+                if !deja.isEmpty { withAnimation(.snappy) { rows = deja } }
             }
+            if v.loc < 0 { guard let i = try await AlloCine.shared.lieu(v.base) else { return }; v.loc = i }
+            var toutes = deja, suite: String?, derniere: Error?
+            for ac in acs.prefix(3) {
+                do {
+                    var p = try await AlloCine.shared.pres(ac, v.loc, day, runtime: runtime)
+                    if Task.isCancelled { return }
+                    toutes = Pres.fusion(toutes, p.rows)
+                    if let n = p.next, n > day { suite = min(suite ?? n, n) }
+                    var n = 2
+                    while n <= min(p.pages, 4) {
+                        let total = p.pages
+                        p = try await AlloCine.shared.pres(ac, v.loc, day, page: n, runtime: runtime)
+                        if Task.isCancelled { return }
+                        toutes = Pres.fusion(toutes, p.rows)
+                        p.pages = total; n += 1
+                    }
+                } catch is CancellationError { return } catch { derniere = error }
+            }
+            // Rien ce jour-là : on saute seul à la prochaine date annoncée
+            if auto, gardees.allSatisfy({ garde($0.seances, "").isEmpty }), toutes.allSatisfy({ garde($0.seances, "").isEmpty }), let n = suite { auto = false; day = n; return }
+            auto = false
+            withAnimation(.snappy) { rows = toutes; next = suite }
+            if toutes.isEmpty, let derniere { throw derniere }
         } catch is CancellationError {} catch { if !Task.isCancelled { err = error.localizedDescription } }
+    }
+}
+
+/// Où le film ressort en France : cinémas et adresses, du plus proche au plus lointain
+struct LieuxRessortie: View {
+    let film: Film, acs: [Int], runtime: Int?, base: [Pres.Row], villes: [(Ville, Double)]
+    var pres = false
+    @Environment(Store.self) private var store
+    @Environment(Position.self) private var pos
+    @Environment(\.openURL) private var openURL
+    @State private var plus: [Pres.Row] = []
+    @State private var lues: Set<Int> = []
+    @State private var enCours: Set<Int> = []
+    @State private var tout = false
+    private var cinemas: [(Cinema, Date)] {
+        Pres.fusion(base, plus).compactMap { r in r.seances.map(\.start).filter { $0 > .now }.min().map { (r.cinema, $0) } }
+            .sorted { Salles.km($0.0, pos.best) < Salles.km($1.0, pos.best) }
+    }
+    private func couverte(_ v: Ville) -> Bool { lues.contains(v.loc) || cinemas.contains { Match.plat($0.0.city) == Match.plat(v.base) } }
+    var body: some View {
+        let l = cinemas, reste = villes.filter { !couverte($0.0) }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { Text("Où il ressort").font(.title3.bold()); Spacer(); if !l.isEmpty { Text("\(l.count) cinéma\(l.count > 1 ? "s" : "")").font(.subheadline).foregroundStyle(.secondary) } }
+            VStack(spacing: 0) {
+                ForEach(Array((tout ? l : Array(l.prefix(6))).enumerated()), id: \.element.0.id) { i, x in
+                    if i > 0 { Divider().opacity(0.3) }
+                    ligne(x.0, x.1)
+                }
+                if l.count > 6 { Button(tout ? "Réduire" : "Voir les \(l.count) cinémas") { Haptic.tap(); withAnimation(.snappy) { tout.toggle() } }.font(.subheadline.weight(.semibold)).padding(14) }
+            }.surface()
+            if !reste.isEmpty {
+                Text(l.isEmpty ? "Villes où il passe" : "Autres villes").font(.headline)
+                VStack(spacing: 0) {
+                    ForEach(tout || l.isEmpty ? reste : Array(reste.prefix(8)), id: \.0.loc) { v, k in
+                        Button { Task { await lire(v) } } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) { Text(v.nom).font(.subheadline.weight(.semibold)); Text(["\(v.n) cinéma\(v.n > 1 ? "s" : "")", k < 900 ? "\(Int(k.rounded())) km" : nil, v.dates.first.map { "dès " + Jour.jolie($0).lowercased() }].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
+                                Spacer()
+                                if enCours.contains(v.loc) { ProgressView() } else { Text("Voir").font(.caption.weight(.semibold)).foregroundStyle(Color.or) }
+                            }.padding(14).contentShape(.rect)
+                        }.buttonStyle(.plain)
+                    }
+                    if !tout && !l.isEmpty && reste.count > 8 { Button("Voir les \(reste.count) villes") { Haptic.tap(); withAnimation(.snappy) { tout = true } }.font(.subheadline.weight(.semibold)).padding(14) }
+                }.surface()
+            }
+        }.padding(.horizontal, 18).padding(.top, 8)
+        .task(id: "\(acs)|\(villes.count)|\(base.count)|\(pres)") {
+            // Rien autour : les adresses des villes les plus proches se chargent seules
+            for (v, _) in villes.filter({ !couverte($0.0) }).prefix(pres ? 1 : 5) { if Task.isCancelled { return }; await lire(v) }
+        }
+    }
+    private func ligne(_ c: Cinema, _ d: Date) -> some View {
+        let k = Salles.km(c, pos.best)
+        return HStack(spacing: 10) {
+            NavigationLink(value: Route.cinema(c)) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) { Text(c.name).font(.subheadline.weight(.semibold)); if store.isCinema(c.id) { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(Color.or) } }
+                    if !c.address.trimmingCharacters(in: .whitespaces).isEmpty { Text(c.address).font(.caption).foregroundStyle(.secondary) }
+                    Text(Jour.jolie(Jour.cine(d)) + " à " + Jour.heure(d) + (k < 900 ? " · \(Int(k.rounded())) km" : "")).font(.caption.weight(.medium)).foregroundStyle(Color.or)
+                }.multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+            }.buttonStyle(.plain).disabled(c.id.hasPrefix("ind-"))
+            Button { if let q = (c.name + " " + c.address).addingPercentEncoding(withAllowedCharacters: .alphanumerics), let u = URL(string: "https://maps.apple.com/?q=" + q) { openURL(u) } } label: { Image(systemName: "map.fill").frame(width: 40, height: 40) }
+                .buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel("Plan")
+        }.padding(14)
+    }
+    private func lire(_ v: Ville) async {
+        guard !lues.contains(v.loc), !enCours.contains(v.loc) else { return }
+        enCours.insert(v.loc); defer { enCours.remove(v.loc) }
+        var out: [Pres.Row] = [], bon = false
+        for ac in acs.prefix(2) {
+            guard let loc = v.loc > 0 ? v.loc : (try? await AlloCine.shared.lieu(v.base)) ?? nil else { continue }
+            guard var p = try? await AlloCine.shared.pres(ac, loc, v.dates.first ?? Jour.cine(.now), runtime: runtime) else { continue }
+            if p.rows.allSatisfy({ garde($0.seances, "").isEmpty }), let n = p.next, let q = try? await AlloCine.shared.pres(ac, loc, n, runtime: runtime) { p = q }
+            bon = true; out = Pres.fusion(out, p.rows)
+        }
+        guard bon else { if !Task.isCancelled { store.say("AlloCiné demande une pause, réessaie dans une minute") }; return }
+        withAnimation(.snappy) { plus = Pres.fusion(plus, out); lues.insert(v.loc) }
     }
 }

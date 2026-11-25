@@ -22,12 +22,13 @@ struct Saison: Hashable, Identifiable { var id: Int, nom: String, nb: Int, date:
 struct Episode: Hashable, Identifiable { var id: Int, n: Int, titre: String, texte: String, date: String, min: Int?, image: String? }
 struct Person: Codable, Hashable, Identifiable { var id: Int; var name: String; var role: String; var photo: String? }
 struct Provider: Codable, Hashable, Identifiable { var id: Int; var name: String; var logo: String? }
+struct Saga: Codable, Hashable { var id: Int, nom: String }
 struct FilmDetail {
     var film: Film
     var original = "", runtime: Int?, tagline = "", genres: [String] = [], directors: [Person] = [], cast: [Person] = []
     var trailer: String?, logo: String?, votes = 0
     var stream: [Provider] = [], free: [Provider] = [], rent: [Provider] = [], buy: [Provider] = [], watchLink: URL?
-    var similar: [Film] = []
+    var similar: [Film] = [], saga: Saga?
     var cleanPoster: String?, cleanBack: String?
     var saisons: [Saison] = [], prochain: String?, fini = false
 }

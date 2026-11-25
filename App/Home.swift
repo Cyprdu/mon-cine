@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main struct MonCineApp: App {
     @State private var store = Store.shared
@@ -8,8 +9,8 @@ import SwiftUI
             Root().environment(store).environment(Position.shared).preferredColorScheme(.dark).tint(.or)
                 .onOpenURL { if $0.isFileURL { store.pendingFile = $0 } }
                 .task(priority: .background) { Disk.purge() }
-                .task { try? await Task.sleep(for: .seconds(6)); await Veille.run(store) }
-                .onChange(of: phase) { _, p in if p == .background { Veille.planifier() } }
+                .task { UNUserNotificationCenter.current().delegate = Avis.shared; try? await Task.sleep(for: .seconds(6)); await Veille.run(store) }
+                .onChange(of: phase) { a, p in if p == .background { Veille.planifier() } else if p == .active && a != .active && Accueil.shared.ready && Veille.derniere < .now.addingTimeInterval(-1200) { Task { await Veille.run(store) } } }
         }
         .backgroundTask(.appRefresh(Veille.id)) { await Veille.planifier(); await Veille.run(Store.shared) }
     }
@@ -32,6 +33,7 @@ struct Root: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { Haptic.pick() }
+        .onChange(of: store.ouvrir) { if let f = store.ouvrir { tab = .home; paths[.home] = [.film(f, "avis")]; store.ouvrir = nil } }
         .onChange(of: store.pendingFile) { if store.pendingFile != nil { tab = .cine } }
         .onAppear {
             if store.pendingFile != nil { tab = .cine }
@@ -60,9 +62,11 @@ struct Root: View {
 
 // MARK: Catégories
 struct RailDef: Identifiable, Hashable {
-    enum Kind: Hashable { case seances, likes, later, rated, cinema, because, foryou, reissues, query(String, [String: String]) }
+    enum Kind: Hashable { case seances, likes, later, rated, cinema, because, foryou, reissues, query(String, [String: String]), saga(Int, String), personne(String, Bool) }
     var id: String, title: String, icon: String, kind: Kind, logo: String? = nil
     var serie: Bool { if case .query(let p, let q) = kind { q["type"] == "tv" || p.hasPrefix("/tv") || p.hasSuffix("/tv") } else { false } }
+    /// Chargé seulement à l’approche
+    var lent: Bool { switch kind { case .saga, .personne: true; default: id.hasPrefix("x") } }
     static let vitrine: Set<String> = ["ttrend", "tfr", "tcrm", "tani"]
     @MainActor static func all(_ s: Store) -> [RailDef] {
         let y = Int(Jour.iso(.now).prefix(4)) ?? 2026
@@ -103,8 +107,59 @@ struct RailDef: Identifiable, Hashable {
             tv("tani", "Animés japonais", "paintpalette.fill", ["genres": "ani", "countries": "JP"]), tv("tkr", "Séries coréennes", "globe.asia.australia.fill", ["countries": "KR"]), tv("tgb", "Séries britanniques", "globe.europe.africa.fill", ["countries": "GB"]),
             tv("tfml", "Séries en famille", "figure.2.and.child.holdinghands", ["genres": "fml"]), tv("tdoc", "Séries documentaires", "camera.fill", ["genres": "doc", "mix": "1"]), tv("told", "Séries cultes", "recordingtape", ["min": "1985", "max": "2009"]),
         ]
+        l += Self.longs(y)
         let pos = Dictionary(s.s.order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         return l.enumerated().sorted { (pos[$0.element.id] ?? 1000 + $0.offset) < (pos[$1.element.id] ?? 1000 + $1.offset) }.map(\.element)
+    }
+}
+
+extension RailDef {
+    /// Suite de l’accueil : rayons thématiques, sagas célèbres et personnalités, mêlés
+    static func longs(_ y: Int) -> [RailDef] {
+        func jw(_ id: String, _ t: String, _ i: String, _ p: [String: String]) -> RailDef { RailDef(id: "x" + id, title: t, icon: i, kind: .query("jw", p)) }
+        func td(_ id: String, _ t: String, _ i: String, _ p: [String: String]) -> RailDef { RailDef(id: "x" + id, title: t, icon: i, kind: .query("/discover/movie", p.merging(["include_adult": "false"]) { a, _ in a })) }
+        let sagas: [(Int, String, String)] = [
+            (1241, "Harry Potter", "Harry Potter"), (119, "Le Seigneur des anneaux", "Seigneur des anneaux"), (10, "Star Wars", "Star Wars"), (86311, "Avengers", "Avengers"), (645, "James Bond", "James Bond"),
+            (328, "Jurassic Park", "Jurassic"), (263, "The Dark Knight", "Dark Knight"), (295, "Pirates des Caraïbes", "Pirates des Caraïbes"), (84, "Indiana Jones", "Indiana Jones"), (264, "Retour vers le futur", "Retour vers le futur"),
+            (121938, "Le Hobbit", "Hobbit"), (131635, "Hunger Games", "Hunger Games"), (531241, "Spider-Man, Tom Holland", "Spider-Man"), (556, "Spider-Man, Tobey Maguire", "Spider-Man"), (573436, "Spider-Verse", "Spider-Man"), (10194, "Toy Story", "Toy Story"),
+            (230, "Le Parrain", "Parrain"), (2344, "Matrix", "Matrix"), (87359, "Mission : Impossible", "Mission Impossible"), (9485, "Fast and Furious", "Fast"), (2150, "Shrek", "Shrek"), (726871, "Dune", "Dune"), (87096, "Avatar", "Avatar"),
+            (89137, "Dragons", "Dragons"), (86066, "Moi, moche et méchant", "Moche et mechant"), (8354, "L’Âge de glace", "age de glace"), (77816, "Kung Fu Panda", "Kung Fu Panda"), (748, "X-Men", "X-Men"), (284433, "Les Gardiens de la Galaxie", "Gardiens de la Galaxie"),
+            (131292, "Iron Man", "Iron Man"), (131296, "Thor", "Thor"), (131295, "Captain America", "Captain America"), (422834, "Ant-Man", "Ant-Man"), (404609, "John Wick", "John Wick"), (31562, "Jason Bourne", "Bourne"), (8091, "Alien", "Alien"), (399, "Predator", "Predator"),
+            (528, "Terminator", "Terminator"), (1575, "Rocky", "Rocky"), (553717, "Creed", "Creed"), (5039, "Rambo", "Rambo"), (1570, "Die Hard", "Die Hard"), (945, "L’Arme fatale", "Arme fatale"), (8945, "Mad Max", "Mad Max"), (173710, "La Planète des singes", "Planete des singes"),
+            (8650, "Transformers", "Transformers"), (304, "Ocean’s", "Ocean s"), (86055, "Men in Black", "Men in Black"), (2980, "SOS Fantômes", "Fantomes"), (33514, "Twilight", "Twilight"), (87118, "Cars", "Cars"), (14740, "Madagascar", "Madagascar"), (720879, "Sonic", "Sonic"),
+            (313086, "Conjuring", "Conjuring"), (656, "Saw", "Saw"), (2602, "Scream", "Scream"), (91361, "Halloween", "Halloween"), (0, "Les Bronzés", "Les Bronzés"), (0, "Taxi", "Taxi"), (0, "OSS 117", "OSS 117"), (0, "Astérix et Obélix", "Astérix"), (0, "La Vérité si je mens", "La vérité si je mens"),
+            (0, "Les Tuche", "Les Tuche"), (0, "Arsène Lupin", "Arsène Lupin"), (0, "Fantômas", "Fantômas"), (0, "Le Gendarme de Saint-Tropez", "Gendarme"), (0, "Les Visiteurs", "Les Visiteurs"), (0, "Camping", "Camping"), (0, "François Pignon", "Pignon"), (0, "Qu’est-ce qu’on a fait au Bon Dieu ?", "bon dieu"),
+            (0, "Les Trois Mousquetaires", "Trois Mousquetaires"), (0, "Les Animaux fantastiques", "Animaux fantastiques"), (0, "Le Monde de Narnia", "Narnia"), (0, "Divergente", "Divergente"), (0, "Le Labyrinthe", "Labyrinthe"), (0, "Millénium", "Millenium"), (0, "Kill Bill", "Kill Bill"), (0, "La Trilogie du dollar", "dollar"),
+            (0, "Sherlock Holmes", "Sherlock Holmes"), (0, "Hercule Poirot", "Poirot"), (0, "À couteaux tirés", "couteaux tires"), (0, "Kingsman", "Kingsman"), (0, "Deadpool", "Deadpool"), (0, "Venom", "Venom"), (0, "Aquaman", "Aquaman"), (0, "Wonder Woman", "Wonder Woman"), (0, "Equalizer", "Equalizer"), (0, "Taken", "Taken"), (0, "Le Transporteur", "Transporteur"),
+            (0, "Very Bad Trip", "Very Bad Trip"), (0, "American Pie", "American Pie"), (0, "Le Journal de Bridget Jones", "Bridget Jones"), (0, "La Nuit au musée", "nuit au musee"), (0, "Maman, j’ai raté l’avion", "rate l avion"), (0, "Paddington", "Paddington"), (0, "Les Indestructibles", "Indestructibles"), (0, "Le Monde de Nemo", "Nemo"), (0, "Vice-versa", "Vice-Versa"),
+            (0, "Le Roi lion", "Roi lion"), (0, "La Reine des neiges", "Reine des neiges"), (0, "Hôtel Transylvanie", "Transylvanie"), (0, "Godzilla et Kong", "Godzilla"), (0, "Sans un bruit", "Sans un bruit"), (0, "L’Exorciste", "Exorciste"), (0, "Destination finale", "Destination finale"), (0, "Massacre à la tronçonneuse", "tronconneuse"), (0, "28 jours plus tard", "28 jours"),
+            (0, "RoboCop", "RoboCop"), (0, "Star Trek", "Star Trek"), (0, "Les Dents de la mer", "dents de la mer"), (0, "La Momie", "La Momie"), (0, "Tomb Raider", "Tomb Raider"), (0, "Resident Evil", "Resident Evil"), (0, "Le Flic de Beverly Hills", "Beverly Hills"), (0, "Bad Boys", "Bad Boys"), (0, "Rush Hour", "Rush Hour"), (0, "Karaté Kid", "Karate Kid"), (0, "Gladiator", "Gladiator"), (0, "Top Gun", "Top Gun"), (0, "Trilogie Cornetto", "Cornetto"),
+        ]
+        let gens: [(String, Bool)] = [("Christopher Nolan", false), ("Steven Spielberg", false), ("Quentin Tarantino", false), ("Martin Scorsese", false), ("Hayao Miyazaki", false), ("Denis Villeneuve", false), ("Louis de Funès", true), ("Stanley Kubrick", false), ("Leonardo DiCaprio", true), ("David Fincher", false), ("Ridley Scott", false), ("Jean-Paul Belmondo", true), ("Alfred Hitchcock", false), ("Tom Hanks", true), ("Tim Burton", false), ("Clint Eastwood", false), ("Jean Dujardin", true), ("François Truffaut", false), ("Luc Besson", false), ("Omar Sy", true), ("Wes Anderson", false), ("James Cameron", false), ("Brad Pitt", true), ("Peter Jackson", false), ("Cédric Klapisch", false), ("Jim Carrey", true), ("Francis Ford Coppola", false), ("Romain Duris", true), ("Jean-Pierre Jeunet", false), ("Robin Williams", true), ("Sergio Leone", false), ("Tom Cruise", true), ("Marion Cotillard", true), ("Jacques Audiard", false), ("Alain Delon", true), ("Guillermo del Toro", false), ("Bong Joon Ho", false), ("Lino Ventura", true), ("Billy Wilder", false), ("Emma Stone", true), ("Catherine Deneuve", true), ("Ryan Gosling", true), ("Akira Kurosawa", false), ("Charlie Chaplin", false), ("Virginie Efira", true), ("Greta Gerwig", false), ("Agnès Varda", false), ("Joel Coen", false)]
+        let votes = "vote_average.desc"
+        var themes = [
+            td("oscars", "Grands films à voir une fois dans sa vie", "trophy.fill", ["sort_by": votes, "vote_count.gte": "12000"]), td("perles", "Perles méconnues", "diamond.fill", ["sort_by": votes, "vote_count.gte": "400", "vote_count.lte": "1500"]),
+            td("long", "Grandes fresques de plus de 2 h 30", "hourglass", ["with_runtime.gte": "150", "sort_by": "vote_count.desc"]), jw("nouv", "Nouveautés de l’année", "sparkles", ["min": "\(y)"]), jw("an1", "Les succès de \(y - 1)", "calendar", ["min": "\(y - 1)", "max": "\(y - 1)"]),
+            jw("d20", "Les années 2020", "calendar", ["min": "2020", "max": "2029", "mix": "1"]), jw("d10", "Les années 2010", "calendar", ["min": "2010", "max": "2019", "mix": "1"]), jw("d70", "Les années 70", "recordingtape", ["min": "1970", "max": "1979", "mix": "1"]), jw("d60", "Les années 60", "film.fill", ["min": "1960", "max": "1969", "mix": "1"]), jw("d50", "Avant 1960", "film.fill", ["max": "1959", "mix": "1"]),
+            jw("gb", "Cinéma britannique", "globe.europe.africa.fill", ["countries": "GB"]), jw("it", "Cinéma italien", "globe.europe.africa.fill", ["countries": "IT"]), jw("es", "Cinéma espagnol", "globe.europe.africa.fill", ["countries": "ES"]), jw("jp", "Cinéma japonais", "globe.asia.australia.fill", ["countries": "JP"]), jw("kr", "Cinéma coréen", "globe.asia.australia.fill", ["countries": "KR"]), jw("in", "Cinéma indien", "globe.asia.australia.fill", ["countries": "IN"]), jw("de", "Cinéma allemand", "globe.europe.africa.fill", ["countries": "DE"]), jw("be", "Cinéma belge", "globe.europe.africa.fill", ["countries": "BE"]), jw("ca", "Cinéma canadien", "globe.americas.fill", ["countries": "CA"]), jw("dk", "Cinéma danois", "globe.europe.africa.fill", ["countries": "DK"]),
+            jw("anijp", "Animation japonaise", "paintpalette.fill", ["genres": "ani", "countries": "JP"]), jw("anifr", "Animation française", "paintpalette.fill", ["genres": "ani", "countries": "FR"]),
+        ]
+        for (g, n, i) in [("cmy", "Comédies", "face.smiling"), ("act", "Action", "bolt.fill"), ("trl", "Thrillers", "eye.fill"), ("scf", "Science-fiction", "sparkle.magnifyingglass"), ("rma", "Romances", "heart.circle.fill"), ("hrr", "Horreur", "moon.fill"), ("drm", "Drames", "drop.fill"), ("ani", "Animation", "paintpalette.fill")] {
+            for (d, a, b) in [("des années 80", 1980, 1989), ("des années 90", 1990, 1999), ("des années 2000", 2000, 2009), ("des années 2010", 2010, 2019)] { themes.append(jw("\(g)\(a)", n + " " + d, i, ["genres": g, "min": "\(a)", "max": "\(b)"])) }
+        }
+        for (g, n, i) in [("crm", "Films policiers", "magnifyingglass"), ("hst", "Films historiques", "building.columns.fill"), ("wsn", "Westerns", "sun.dust.fill"), ("spt", "Films de sport", "figure.run")] { themes.append(jw("g" + g, n, i, ["genres": g, "mix": "1"])) }
+        for (k, n) in [("12", "Aventure"), ("9648", "Mystère"), ("36", "Histoire"), ("10402", "Musique"), ("37", "Westerns"), ("878", "Science-fiction"), ("35", "Comédie"), ("18", "Drame"), ("53", "Thriller"), ("16", "Animation"), ("27", "Horreur"), ("28", "Action"), ("10751", "Famille"), ("99", "Documentaire"), ("80", "Policier"), ("10749", "Romance"), ("10752", "Guerre"), ("14", "Fantastique")] {
+            themes.append(td("t" + k, "\(n) : les mieux notés", "trophy.fill", ["with_genres": k, "sort_by": votes, "vote_count.gte": ["99", "36", "37", "10402", "10752"].contains(k) ? "500" : "2500"]))
+        }
+        for (c, n) in [("fr", "français"), ("ja", "japonais"), ("ko", "coréens"), ("it", "italiens"), ("es", "espagnols"), ("de", "allemands"), ("hi", "indiens"), ("sv", "suédois"), ("da", "danois"), ("pt", "brésiliens et portugais"), ("fa", "iraniens")] { themes.append(td("l" + c, "Films \(n) les mieux notés", "globe", ["with_original_language": c, "sort_by": votes, "vote_count.gte": "300"])) }
+        // Deux rayons, une saga, une personnalité de temps en temps
+        var out: [RailDef] = [], s = 0, p = 0, t = 0
+        while s < sagas.count || p < gens.count || t < themes.count {
+            for _ in 0..<2 where s < sagas.count { let x = sagas[s]; out.append(RailDef(id: "s" + Match.plat(x.1), title: "La saga " + x.1, icon: "square.stack.fill", kind: .saga(x.0, x.2))); s += 1; if t < themes.count { out.append(themes[t]); t += 1 } }
+            if p < gens.count { let x = gens[p]; out.append(RailDef(id: "n" + Match.plat(x.0), title: (x.1 ? "Avec " : "Les films de ") + x.0, icon: x.1 ? "person.fill" : "megaphone.fill", kind: .personne(x.0, x.1))); p += 1 }
+            if s >= sagas.count && t < themes.count { out.append(themes[t]); t += 1 }
+        }
+        return out
     }
 }
 
@@ -140,7 +195,9 @@ struct RailDef: Identifiable, Hashable {
         await reg
         // Ce que l’accueil montre d’abord, puis les rayons réservés aux onglets Films et Séries
         let tous = RailDef.all(store).filter { !store.s.hidden.contains($0.id) }
-        let defs = tous.filter { !$0.serie || RailDef.vitrine.contains($0.id) } + tous.filter { $0.serie && !RailDef.vitrine.contains($0.id) }
+        // Le début se prépare d’avance ; la suite se charge en descendant
+        let tete = tous.filter { !$0.lent }
+        let defs = tete.filter { !$0.serie || RailDef.vitrine.contains($0.id) } + tete.filter { $0.serie && !RailDef.vitrine.contains($0.id) }
         for (n, d) in defs.enumerated() {
             await load(d, store)
             if n >= 4 { ready = true }
@@ -148,9 +205,20 @@ struct RailDef: Identifiable, Hashable {
         ready = true
         await ImageBank.shared.prefetch(h.flatMap { [TMDB.img(Visuel($0, details[$0.id]).path, 780), TMDB.img(details[$0.id]?.logo, 500)] })
     }
+    @ObservationIgnored private var enCours = Set<String>()
+    /// Rayon qui approche de l’écran, et les trois suivants
+    func approche(_ d: RailDef, _ liste: [RailDef], _ store: Store) async {
+        guard d.lent, let i = liste.firstIndex(of: d) else { return }
+        await withTaskGroup(of: Void.self) { g in
+            for x in liste[i..<min(i + 4, liste.count)] where x.lent && rails[x.id] == nil && !enCours.contains(x.id) { g.addTask { await self.load(x, store) } }
+        }
+    }
     func load(_ d: RailDef, _ store: Store) async {
         var l: [Film] = []
+        enCours.insert(d.id); defer { enCours.remove(d.id) }
         switch d.kind {
+        case .saga(let i, let m): l = await TMDB.saga(i, mot: m)
+        case .personne(let n, let joue): l = await TMDB.filmographie(n, joue: joue)
         case .query(let p, let q): l = (try? await Catalogue.list(p, q)) ?? rails[d.id] ?? []
         case .because:
             if let s = Self.seed(store) { l = (try? await Catalogue.list(s.chemin + "/recommendations", [:])) ?? rails[d.id] ?? []; titles[d.id] = "Parce que tu as aimé « \(s.title) »" }
@@ -212,6 +280,7 @@ struct HomeView: View {
         if genre == .tout && r.serie && !RailDef.vitrine.contains(r.id) { return false }
         if genre == .films && (r.serie || r.id == "ttrend") { return false }
         if genre == .series && !r.serie && r.id != "foryou" { return false }
+        if r.lent { return acc.rails[r.id]?.isEmpty != true }
         switch r.kind {
         case .seances: return !store.upcoming.isEmpty
         case .likes: return !store.likes.isEmpty
@@ -220,7 +289,7 @@ struct HomeView: View {
         case .cinema: return !store.cinemas.isEmpty
         case .because: return Accueil.seed(store) != nil && acc.rails[r.id]?.isEmpty != true
         case .foryou: return acc.rails[r.id]?.isEmpty == false
-        case .query, .reissues: return acc.rails[r.id]?.isEmpty != true
+        case .query, .reissues, .saga, .personne: return acc.rails[r.id]?.isEmpty != true
         }
     }
     private var une: [Film] {
@@ -240,7 +309,8 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity).padding(.top, -10).opacity(colle ? 0 : 1)
                 }
                 LazyVStack(alignment: .leading, spacing: 30) {
-                    ForEach(RailDef.all(store).filter(visible)) { RailView(def: $0, genre: genre) }
+                    let liste = RailDef.all(store).filter(visible)
+                    ForEach(liste) { r in RailView(def: r, genre: genre).task { await acc.approche(r, liste, store) } }
                     Text("Ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB. Catalogue et streaming : JustWatch. Séances : AlloCiné.")
                         .font(.caption2).foregroundStyle(.tertiary).padding(.horizontal, 18).padding(.bottom, 30)
                 }
@@ -256,6 +326,7 @@ struct HomeView: View {
             } else {
             ToolbarItem(placement: .topBarLeading) { Text("Mon Ciné").font(.system(.title2, design: .rounded, weight: .heavy)).fixedSize() }.sharedBackgroundVisibility(.hidden)
             }
+            if Son.shared.visible && !colle { ToolbarItem(placement: .topBarTrailing) { BoutonSon() } }
             ToolbarItem(placement: .topBarTrailing) { Button("Surprends-moi", systemImage: "dice.fill") { roll() }.symbolEffect(.bounce, value: dice) }
             ToolbarItem(placement: .topBarTrailing) { NavigationLink(value: Route.settings) { Image(systemName: "gearshape.fill") }.accessibilityLabel("Réglages") }
         }
@@ -370,7 +441,7 @@ struct RailView: View {
         case .query(let p, let q): .grid(GridQuery(title: def.title, path: p, params: q))
         case .likes, .later, .rated: .grid(GridQuery(title: def.title, path: "", films: shown))
         case .because: Accueil.seed(store).map { .grid(GridQuery(title: title, path: $0.chemin + "/recommendations")) }
-        case .foryou, .reissues: .grid(GridQuery(title: def.title, path: "", films: shown))
+        case .foryou, .reissues, .saga, .personne: .grid(GridQuery(title: def.title, path: "", films: shown))
         default: nil
         }
     }

@@ -3,6 +3,8 @@ import CryptoKit
 import Security
 import Observation
 import CoreLocation
+import Vision
+import UIKit
 
 // MARK: Trousseau
 enum Trousseau {
@@ -103,7 +105,7 @@ enum TMDB {
     }
     static func detail(_ id: Int) async throws -> FilmDetail {
         let tv = id < 0
-        let j = try await get((tv ? "/tv/" : "/movie/") + String(abs(id)), ["append_to_response": "credits,videos,watch/providers,recommendations,images", "include_video_language": "fr,en", "include_image_language": "fr,en,null"], ttl: 3 * 86400)
+        let j = try await get((tv ? "/tv/" : "/movie/") + String(abs(id)), ["append_to_response": "credits,videos,watch/providers,recommendations,images,translations", "include_video_language": "fr,en", "include_image_language": "fr,en,ja,ko,es,it,de,zh,null"], ttl: 3 * 86400)
         guard let f = film(j) else { throw Oops("Fiche introuvable") }
         var d = FilmDetail(film: f)
         let ot = (j["original_title"] ?? j["original_name"]) as? String ?? ""
@@ -136,9 +138,8 @@ enum TMDB {
             return l.max { ($0["vote_average"] as? Double ?? 0, $0["vote_count"] as? Int ?? 0) < ($1["vote_average"] as? Double ?? 0, $1["vote_count"] as? Int ?? 0) }?["file_path"] as? String
         }
         d.cleanPoster = clean("posters"); d.cleanBack = clean("backdrops")
-        let logos = ((j["images"] as? J)?["logos"] as? [J]) ?? []
-        d.logo = (logos.first { $0["iso_639_1"] as? String == "fr" } ?? logos.first)?["file_path"] as? String
-        if d.logo?.hasSuffix(".svg") == true { d.logo = nil }
+        d.logo = await logo(j, titre: f.title)
+        if let c = j["belongs_to_collection"] as? J, let i = c["id"] as? Int { d.saga = Saga(id: i, nom: Self.nomSaga(c["name"] as? String ?? "")) }
         if let w = ((j["watch/providers"] as? J)?["results"] as? J)?["FR"] as? J {
             func prov(_ k: String) -> [Provider] { ((w[k] as? [J]) ?? []).compactMap(provider) }
             d.stream = prov("flatrate"); d.free = prov("free") + prov("ads"); d.rent = prov("rent"); d.buy = prov("buy")
@@ -146,6 +147,83 @@ enum TMDB {
         }
         d.similar = (((j["recommendations"] as? J)?["results"] as? [J]) ?? []).compactMap(film)
         return d
+    }
+    /// Logos dans l’ordre de préférence. Film non traduit en France : logo d’origine. Film traduit : logo français, jamais le québécois.
+    static func logos(_ j: J, titre: String) -> (sur: [String], douteux: [String], quebec: String) {
+        let l = (((j["images"] as? J)?["logos"] as? [J]) ?? []).filter { !(($0["file_path"] as? String)?.hasSuffix(".svg") ?? true) }
+        let tr = ((j["translations"] as? J)?["translations"] as? [J]) ?? []
+        func t(_ lang: String, _ pays: String?) -> String {
+            let d = tr.first { $0["iso_639_1"] as? String == lang && (pays == nil || $0["iso_3166_1"] as? String == pays) }?["data"] as? J
+            return (d?["title"] ?? d?["name"]) as? String ?? ""
+        }
+        func pris(_ lang: String?, _ ok: (String) -> Bool = { _ in true }) -> [String] {
+            l.filter { x in (x["iso_639_1"] as? String) == lang && ok(x["iso_3166_1"] as? String ?? "") }.compactMap { $0["file_path"] as? String }
+        }
+        let ol = j["original_language"] as? String ?? "en", original = (j["original_title"] ?? j["original_name"]) as? String ?? ""
+        let anglais = ol == "en" ? original : t("en", "US").isEmpty ? t("en", nil) : t("en", "US"), quebec = t("fr", "CA"), nous = Match.plat(titre)
+        let q = Match.plat(quebec).isEmpty || Match.plat(quebec) == nous ? "" : quebec
+        let fr = pris("fr") { $0 == "FR" }, flou = pris("fr") { $0 != "FR" && $0 != "CA" }
+        if ol == "fr" { return (fr + flou + pris(nil) + pris("en"), [], "") }
+        if nous == Match.plat(anglais) { return (pris("en") + fr + pris(nil), q.isEmpty ? flou : [], q) }
+        if nous == Match.plat(original) { return (pris(ol) + fr + pris(nil), q.isEmpty ? flou : [], q) }
+        return q.isEmpty ? (fr + flou, [], "") : (fr, flou, q)
+    }
+    /// Un logo français de pays inconnu est lu : s’il porte le titre québécois, il est écarté
+    private static func logo(_ j: J, titre: String) async -> String? {
+        let c = logos(j, titre: titre)
+        if let p = c.sur.first { return p }
+        for p in c.douteux.prefix(4) {
+            let key = "ocr:" + p
+            var lu = Disk.read(key).flatMap { String(data: $0.data, encoding: .utf8) }
+            if lu == nil, !demo, let u = img(p, 500), let (data, _) = try? await URLSession.shared.data(from: u) {
+                let texte = lire(data)
+                Disk.write(key, Data(texte.utf8)); lu = texte
+            }
+            if !quebecois(lu ?? "", titre, c.quebec) { return p }
+        }
+        return nil
+    }
+    private static func lire(_ d: Data) -> String {
+        guard let im = UIImage(data: d) else { return "" }
+        // Logo transparent : posé sur fond gris pour que Vision distingue un texte blanc comme un texte noir
+        let r = UIGraphicsImageRenderer(size: CGSize(width: im.size.width + 40, height: im.size.height + 40)).image { c in
+            UIColor(white: 0.45, alpha: 1).setFill(); c.fill(CGRect(x: 0, y: 0, width: im.size.width + 40, height: im.size.height + 40)); im.draw(at: CGPoint(x: 20, y: 20))
+        }
+        guard let cg = r.cgImage else { return "" }
+        let q = VNRecognizeTextRequest(); q.recognitionLanguages = ["fr-FR", "en-US"]
+        try? VNImageRequestHandler(cgImage: cg).perform([q])
+        return (q.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+    }
+    /// Le texte lu ressemble davantage au titre québécois qu’au titre français
+    static func quebecois(_ lu: String, _ fr: String, _ qc: String) -> Bool {
+        let l = Set(Match.plat(lu).split(separator: " ")), a = Set(Match.plat(fr).split(separator: " ")), b = Set(Match.plat(qc).split(separator: " "))
+        return l.intersection(b.subtracting(a)).count > l.intersection(a.subtracting(b)).count
+    }
+    static func nomSaga(_ n: String) -> String { n.replacingOccurrences(of: "\\s*[-–:(\\[]*\\s*(saga|collection|la collection|la saga|la série)[)\\]]*\\s*$", with: "", options: [.regularExpression, .caseInsensitive]).trimmingCharacters(in: .whitespaces) }
+    /// Films d’une saga, dans l’ordre de sortie
+    static func saga(_ id: Int) async throws -> [Film] {
+        let j = try await get("/collection/\(id)", ttl: 7 * 86400)
+        return ((j["parts"] as? [J]) ?? []).compactMap(film).filter { $0.poster != nil }.sorted { ($0.release.isEmpty ? "9" : $0.release) < ($1.release.isEmpty ? "9" : $1.release) }
+    }
+    /// Saga célèbre : numéro connu s’il correspond bien au mot attendu, sinon recherche
+    static func saga(_ id: Int, mot: String) async -> [Film] {
+        let m = Match.plat(mot)
+        if let j = try? await get("/collection/\(id)", ttl: 7 * 86400) {
+            let t = ([j["name"] as? String ?? ""] + ((j["parts"] as? [J]) ?? []).flatMap { [$0["title"] as? String ?? "", $0["original_title"] as? String ?? ""] }).map(Match.plat)
+            if t.contains(where: { (" " + $0 + " ").contains(" " + m + " ") }), let l = try? await saga(id), l.count > 1 { return l }
+        }
+        guard let j = try? await get("/search/collection", ["query": mot], ttl: 30 * 86400) else { return [] }
+        let r = (j["results"] as? [J]) ?? []
+        let c = r.first { (" " + Match.plat($0["name"] as? String ?? "") + " ").contains(" " + m + " ") }
+        guard let i = c?["id"] as? Int else { return [] }
+        return (try? await saga(i)) ?? []
+    }
+    /// Films d’une personne : réalisés, ou joués, les plus vus d’abord
+    static func filmographie(_ nom: String, joue: Bool) async -> [Film] {
+        guard let p = (try? await people(nom))?.first(where: { Match.plat($0.name) == Match.plat(nom) }), let j = try? await get("/person/\(p.id)/movie_credits", ttl: 7 * 86400) else { return [] }
+        let l = (j[joue ? "cast" : "crew"] as? [J] ?? []).filter { joue ? ($0["order"] as? Int ?? 99) < 6 : $0["job"] as? String == "Director" }
+        var vus = Set<Int>()
+        return l.sorted { ($0["vote_count"] as? Int ?? 0) > ($1["vote_count"] as? Int ?? 0) }.compactMap(film).filter { $0.poster != nil && vus.insert($0.id).inserted }.prefix(40).map { $0 }
     }
     static func saison(_ id: Int, _ n: Int) async throws -> [Episode] {
         let j = try await get("/tv/\(abs(id))/season/\(n)", ttl: 86400)
@@ -160,17 +238,31 @@ enum TMDB {
         func rank(_ x: J) -> Int { ((x["display_priorities"] as? J)?["FR"] as? Int) ?? 999 }
         return Array(((j["results"] as? [J]) ?? []).sorted { rank($0) < rank($1) }.compactMap(provider).prefix(50))
     }
-    /// AlloCiné → fiche TMDB
+    /// AlloCiné → fiche TMDB ; les versions longues ou restaurées mènent à l’œuvre d’origine
     static func resolve(_ f: ACFilm) async throws -> Film? {
-        for t in [Match.net(f.title).isEmpty ? f.title : Match.net(f.title), f.original] where !t.isEmpty {
+        let v = Match.version(f.title)
+        var essais: [String] = []
+        for t in Match.variantes(f.title) + (f.original.isEmpty ? [] : Match.variantes(f.original)) where !essais.contains(t) { essais.append(t) }
+        for t in essais {
             let j = try await get("/search/movie", ["query": t, "include_adult": "false", "page": "1"], ttl: 7 * 86400)
             let ok = ((j["results"] as? [J]) ?? []).compactMap { x -> (Film, Double, Int)? in
                 guard let m = film(x), Match.same(title: m.title, original: x["original_title"] as? String ?? "", year: Int(m.year), f) else { return nil }
-                return (m, x["popularity"] as? Double ?? 0, f.year.flatMap { y in Int(m.year).map { abs($0 - y) } } ?? 0)
+                return (m, x["popularity"] as? Double ?? 0, v ? 0 : f.year.flatMap { y in Int(m.year).map { abs($0 - y) } } ?? 0)
             }
-            if let b = ok.min(by: { ($0.2, -$0.1) < ($1.2, -$1.1) }) { return b.0 }
+            if let b = ok.min(by: { ($0.2, -$0.1) < ($1.2, -$1.1) }) {
+                if v { Alias.noter(b.0.id, f.movie) }
+                return b.0
+            }
         }
         return nil
+    }
+}
+/// Fiches AlloCiné reconnues comme une autre version d’un film
+enum Alias {
+    static func lire(_ id: Int) -> [Int] { (UserDefaults.standard.dictionary(forKey: "alias") as? [String: [Int]])?[String(id)] ?? [] }
+    static func noter(_ id: Int, _ ac: Int) {
+        var d = UserDefaults.standard.dictionary(forKey: "alias") as? [String: [Int]] ?? [:]
+        if d[String(id)]?.contains(ac) != true { d[String(id), default: []].append(ac); UserDefaults.standard.set(d, forKey: "alias") }
     }
 }
 
@@ -196,6 +288,7 @@ actor AlloCine {
     static let shared = AlloCine()
     private var recent: [Date] = [], pause = Date.distantPast, last = Date.distantPast, inflight: [String: Task<Programme, Error>] = [:]
 
+    var pauseFinie: Bool { pause < .now }
     func programme(_ id: String, _ day: String, fresh: Bool = false) async throws -> Programme {
         let key = "ac2:\(id):\(day)"
         if TMDB.demo { return Demo.programme(id, day) }

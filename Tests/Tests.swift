@@ -10,6 +10,22 @@ final class Tests: XCTestCase {
         XCTAssertFalse(Match.same(["Shrek"], ["Shrek 2"])); XCTAssertTrue(Match.same(["Shrek"], ["Shrek (reprise)"])); XCTAssertFalse(Match.same(["Alien"], ["Aliens"]))
         XCTAssertEqual(Match.net("Interstellar (VOST) - Reprise"), "Interstellar")
     }
+    func testVersions() {
+        let f = ACFilm(movie: 9, title: "Le Seigneur des Anneaux, Le Retour du Roi (version longue)", original: "", years: [2026], year: 2026, runtime: 263, genres: [], director: "", poster: nil, seances: [])
+        XCTAssertTrue(Match.same(title: "Le Seigneur des anneaux : Le Retour du roi", original: "The Lord of the Rings: The Return of the King", year: 2003, f))
+        XCTAssertEqual(Match.variantes(f.title).first, "Le Seigneur des Anneaux, Le Retour du Roi"); XCTAssertTrue(f.reissue); XCTAssertFalse(Match.version("Le Retour du roi"))
+        let images: J = ["logos": [["file_path": "/qc.png", "iso_639_1": "fr"], ["file_path": "/en.png", "iso_639_1": "en"]] as [J]]
+        let tr: J = ["translations": [["iso_639_1": "fr", "iso_3166_1": "CA", "data": ["title": "Spider-Man : Les retrouvailles"]]] as [J]]
+        let j: J = ["original_language": "en", "original_title": "Spider-Man: Homecoming", "images": images, "translations": tr]
+        XCTAssertEqual(TMDB.logos(j, titre: "Spider-Man : Homecoming").sur, ["/en.png"])
+        XCTAssertTrue(TMDB.quebecois("SPIDER-MAN LOIN DES SIENS", "Spider-Man : Far From Home", "Spider-Man : Loin des siens"))
+        XCTAssertEqual(TMDB.nomSaga("Harry Potter - Saga"), "Harry Potter")
+    }
+    @MainActor func testLiens() {
+        let p = Offer(provider: Provider(id: 119, name: "Amazon Prime Video"), kind: "RENT", deep: URL(string: "https://app.primevideo.com/watch?gti=1"), web: URL(string: "https://app.primevideo.com/detail?gti=1")!)
+        XCTAssertFalse(Lecture.liens(p, lecture: false).contains { $0.0.absoluteString.contains("watch") }); XCTAssertTrue(Lecture.liens(p, lecture: true)[0].0.absoluteString.contains("watch"))
+        XCTAssertEqual(Lecture.fiche(URL(string: "https://www.netflix.com/watch/8?t=3")!).absoluteString, "https://www.netflix.com/title/8")
+    }
     func testJournee() {
         for (l, d) in [("2026-12-12T23:59", "2026-12-12"), ("2026-12-13T00:01", "2026-12-12"), ("2026-12-13T02:59", "2026-12-12"), ("2026-12-13T03:00", "2026-12-13"), ("2027-01-01T00:01", "2026-12-31"), ("2028-03-01T00:30", "2028-02-29")] { XCTAssertEqual(Jour.cine(Jour.local(l)!), d) }
         XCTAssertEqual(Jour.shift("2026-10-25", 1), "2026-10-26"); XCTAssertEqual(Jour.shift("2027-03-28", 1), "2027-03-29")

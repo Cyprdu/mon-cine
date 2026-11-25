@@ -126,24 +126,40 @@ extension Store {
     func direct(_ l: [Offer]) -> Offer? { s.services.lazy.compactMap { p in l.first { $0.included && famille($0.provider) == famille(p) } }.first }
 }
 
-/// Lien universel vers la lecture, puis lien propre à l’app, puis fiche ; le navigateur seulement si l’app manque.
+/// Compris dans un abonnement possédé : lecture directe. Sinon (location, achat, autre abonnement) : la fiche du film dans l’app, jamais le lecteur.
 @MainActor enum Lecture {
     static func open(_ o: Offer) async {
         Haptic.ok()
+        for (u, universel) in liens(o, lecture: o.included && Store.shared.owns(o.provider)) {
+            if await UIApplication.shared.open(u, options: universel ? [.universalLinksOnly: true] : [:]) { return }
+        }
+        await UIApplication.shared.open(fiche(o.web))
+    }
+    static func liens(_ o: Offer, lecture: Bool) -> [(URL, Bool)] {
         var l: [(URL, Bool)] = []
-        if let d = o.deep { l.append((d, d.scheme == "https")) }
-        for u in [o.deep, o.web].compactMap({ $0 }) {
-            let h = u.host() ?? ""
-            if h.hasSuffix("netflix.com"), let x = URL(string: u.absoluteString.replacingOccurrences(of: "https://", with: "nflx://")) { l.append((x, false)) }
-            if h.hasSuffix("primevideo.com"), let x = URL(string: "aiv://aiv/detail?" + (u.query() ?? "")) { l.append((x, false)) }
-            if h.hasSuffix("disneyplus.com"), let x = URL(string: u.absoluteString.replacingOccurrences(of: "https://", with: "disneyplus://")) { l.append((x, false)) }
-        }
-        l.append((o.web, true))
-        for (u, universal) in l {
-            let ok = await UIApplication.shared.open(u, options: universal ? [.universalLinksOnly: true] : [:])
-            if ok { return }
-        }
-        await UIApplication.shared.open(o.web)
+        if lecture, let d = o.deep { l.append((d, d.scheme == "https")); if let a = app(d) { l.append((a, false)) } }
+        let f = fiche(o.web)
+        l.append((f, true))
+        if let a = app(f) { l.append((a, false)) }
+        return l
+    }
+    /// Adresse propre à l’app, pour les services qui ignorent parfois le lien universel
+    private static func app(_ u: URL) -> URL? {
+        let h = u.host() ?? "", s = u.absoluteString
+        if h.hasSuffix("netflix.com") { return URL(string: s.replacingOccurrences(of: "https://", with: "nflx://")) }
+        if h.hasSuffix("primevideo.com"), let q = u.query() { return URL(string: "aiv://aiv/" + (u.path().contains("/watch") ? "watch?" : "detail?") + q) }
+        if h.hasSuffix("disneyplus.com") { return URL(string: s.replacingOccurrences(of: "https://", with: "disneyplus://")) }
+        return nil
+    }
+    /// Adresse de lecture ramenée à celle de la fiche, sans lecture automatique
+    static func fiche(_ u: URL) -> URL {
+        guard var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return u }
+        let h = c.host ?? ""
+        c.queryItems = c.queryItems.map { $0.filter { !["autoplay", "autoPlay", "t", "play", "action"].contains($0.name) } }
+        if c.queryItems?.isEmpty == true { c.queryItems = nil }
+        if h.hasSuffix("primevideo.com") { c.path = c.path.replacingOccurrences(of: "/watch", with: "/detail") }
+        if h.hasSuffix("netflix.com") { c.path = c.path.replacingOccurrences(of: "/watch/", with: "/title/") }
+        return c.url ?? u
     }
 }
 
@@ -165,7 +181,7 @@ extension Store {
     static func old(_ f: Film) -> Bool { Jour.parse(f.release, "yyyy-MM-dd").map { $0 < .now.addingTimeInterval(-540 * 86400) } ?? false }
     func reissue(_ f: Film) -> Bool { has(f) && Self.old(f) }
 }
-extension ACFilm { var reissue: Bool { year.map { $0 <= (Int(Jour.iso(.now).prefix(4)) ?? 0) - 3 } ?? false } }
+extension ACFilm { var reissue: Bool { Match.version(title) || year.map { $0 <= (Int(Jour.iso(.now).prefix(4)) ?? 0) - 3 } ?? false } }
 struct Ressortie: View {
     var long = true
     var body: some View {
@@ -253,7 +269,7 @@ struct OfferList: View {
                                 Pic(url: TMDB.img(o.provider.logo, 92)) { Color.white.opacity(0.12) }.frame(width: 40, height: 40).clipShape(.rect(cornerRadius: 10))
                                 VStack(alignment: .leading, spacing: 1) { Text(o.provider.name).font(.headline); if store.owns(o.provider) && o.included { Text("Mon abonnement").font(.caption2).foregroundStyle(Color.or) } }
                                 Spacer()
-                                Image(systemName: o.included ? "play.fill" : "arrow.up.right").foregroundStyle(.secondary)
+                                Image(systemName: o.included && store.owns(o.provider) ? "play.fill" : "arrow.up.right").foregroundStyle(.secondary)
                             }.padding(.horizontal, 14).frame(height: 62).contentShape(.rect)
                         }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
                     }
