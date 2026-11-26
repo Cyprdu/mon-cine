@@ -179,13 +179,14 @@ extension Store {
         else if let l = try? await TMDB.list("/movie/now_playing") { ids = Set(l.map(\.id)) }
         if TMDB.demo { ids = ids.filter { !$0.isMultiple(of: 2) } }
     }
+    /// Film sorti il y a plus de trois mois : s’il repasse en salles, c’est une ressortie
     /// Film ancien déjà relu par la base et sans aucune ville : il n’est plus en salles
     func has(_ f: Film) -> Bool {
         if f.tv { return false }
         if Self.old(f), let r = Registre.shared.films[f.id], r.lu != nil { return !r.lieux.isEmpty }
         return ids.contains(f.id)
     }
-    static func old(_ f: Film) -> Bool { Jour.parse(f.release, "yyyy-MM-dd").map { $0 < .now.addingTimeInterval(-540 * 86400) } ?? false }
+    static func old(_ f: Film) -> Bool { Jour.parse(f.release, "yyyy-MM-dd").map { $0 < .now.addingTimeInterval(-100 * 86400) } ?? false }
     func reissue(_ f: Film) -> Bool { has(f) && Self.old(f) }
 }
 extension ACFilm { var reissue: Bool { Match.version(title) || year.map { $0 <= (Int(Jour.iso(.now).prefix(4)) ?? 0) - 3 } ?? false } }

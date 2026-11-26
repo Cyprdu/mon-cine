@@ -253,6 +253,7 @@ enum TMDB {
     }
     /// AlloCiné → fiche TMDB ; les versions longues ou restaurées mènent à l’œuvre d’origine
     static func resolve(_ f: ACFilm) async throws -> Film? {
+        if let i = await Registre.shared.tmdb(ac: f.movie, base: true), let d = try? await detail(i) { return d.film }
         let v = Match.version(f.title)
         var essais: [String] = []
         for t in Match.variantes(f.title) + (f.original.isEmpty ? [] : Match.variantes(f.original)) where !essais.contains(t) { essais.append(t) }
@@ -267,6 +268,8 @@ enum TMDB {
                 return b.0
             }
         }
+        // Titre introuvable : le numéro AlloCiné, connu de la base ou de Wikidata, désigne la fiche
+        if let i = await Registre.shared.tmdb(ac: f.movie), let d = try? await detail(i) { return d.film }
         return nil
     }
 }

@@ -3,6 +3,8 @@
 // et données ouvertes de programmation des cinémas indépendants (SCARE, data.gouv.fr).
 // 1 400 pages AlloCiné par jour au plus (45 000 requêtes par mois avec le reste), une par minute ; pause d’une heure au premier refus. Aucune donnée personnelle.
 const UA = { "User-Agent": "mon-cine-perso/1.0" }, AC = "https://www.allocine.fr/seance/film-", JOUR = 86400, MAX = 1400;
+// Ressortie : film sorti il y a plus de trois mois (un succès de l’été qui repasse à Noël compte aussi)
+const VIEUX = () => new Date(Date.now() - 100 * 86400000).toISOString().slice(0, 10);
 const now = () => Math.floor(Date.now() / 1000), today = () => new Date().toISOString().slice(0, 10);
 const json = (o, s = 200, age = 300) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json; charset=utf-8", "cache-control": `public, max-age=${age}` } });
 const txt = s => s.replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&amp;/g, "&");
@@ -75,16 +77,16 @@ async function wikidata(e, ids) {
   await e.DB.batch(st);
 }
 async function catalogue(e) {
-  const t = now(), st = [], y = new Date().getFullYear();
-  for (let p = 0; p < 3; p++) {
+  const t = now(), st = [], y = new Date().getFullYear(), vieux = VIEUX();
+  for (const [ans, pages] of [[{ max: y - 2 }, 3], [{ min: y - 1, max: y }, 2]]) for (let p = 0; p < pages; p++) {
     const r = await fetch("https://apis.justwatch.com/graphql", { method: "POST", headers: { ...UA, "content-type": "application/json" }, body: JSON.stringify({
       query: 'query($f:TitleFilter!,$a:String){popularTitles(country:FR,filter:$f,first:90,after:$a,sortBy:POPULAR){edges{node{content(country:FR,language:"fr"){title originalReleaseYear originalReleaseDate posterUrl externalIds{tmdbId}} offers(country:FR,platform:WEB){monetizationType package{clearName}}}}}}',
-      variables: { f: { objectTypes: ["MOVIE"], monetizationTypes: ["CINEMA"], releaseYear: { max: y - 2 } }, a: p ? btoa(String(p * 90)) : null } }) });
+      variables: { f: { objectTypes: ["MOVIE"], monetizationTypes: ["CINEMA"], releaseYear: ans }, a: p ? btoa(String(p * 90)) : null } }) });
     if (!r.ok) break;
     const ed = (await r.json()).data?.popularTitles?.edges || [];
     for (const { node: n } of ed) {
       const c = n.content, id = +c.externalIds?.tmdbId;
-      if (!id) continue;
+      if (!id || (c.originalReleaseDate || `${c.originalReleaseYear}-01-01`) > vieux) continue;
       const ch = [...new Set(n.offers.filter(o => o.monetizationType === "CINEMA").map(o => o.package.clearName.trim().replace("Cinemas Pathe", "Pathé").replace("CGR Cinémas", "CGR")))].filter(x => !/allocin/i.test(x));
       st.push(e.DB.prepare("insert into films(tmdb,titre,sortie,affiche,chaines,jw) values(?,?,?,?,?,?) on conflict(tmdb) do update set titre=excluded.titre,sortie=excluded.sortie,affiche=excluded.affiche,chaines=excluded.chaines,jw=excluded.jw")
         .bind(id, c.title, c.originalReleaseDate || `${c.originalReleaseYear}-01-01`, c.posterUrl ? "https://images.justwatch.com" + c.posterUrl.replace("{profile}", "s332").replace("{format}", "webp") : null, JSON.stringify(ch), t));
@@ -128,7 +130,7 @@ async function salle(e) {
   if (!s) return false;
   const h = await page(e, `https://www.allocine.fr/seance/salle_gen_csalle=${s.id}.html`);
   if (h === null) return true;
-  const l = seances(h), j = JSON.stringify(l), max = new Date().getFullYear() - 2 + "-12-31", jour = today();
+  const l = seances(h), j = JSON.stringify(l), max = VIEUX(), jour = today();
   await e.DB.batch([
     e.DB.prepare("update salles set lu=?,n=? where id=?").bind(t, dates(h).length, s.id),
     e.DB.prepare("delete from passages where salle=?").bind(s.id),
@@ -160,7 +162,7 @@ async function independants(e) {
   else await e.DB.batch([
     e.DB.prepare("delete from etat where k='ind_url'"), e.DB.prepare("delete from ind where vu<?").bind(debut),
     e.DB.prepare("insert or ignore into tmeta(tmdb,titre,affiche) select tmdb,max(titre),max(affiche) from ind where tmdb is not null group by tmdb"),
-    e.DB.prepare("update films set cine=?1 where tmdb in (select i.tmdb from ind i join tmeta m on m.tmdb=i.tmdb where m.sortie<>'' and m.sortie<=?2)").bind(t, new Date().getFullYear() - 2 + "-12-31"),
+    e.DB.prepare("update films set cine=?1 where tmdb in (select i.tmdb from ind i join tmeta m on m.tmdb=i.tmdb where m.sortie<>'' and m.sortie<=?2)").bind(t, VIEUX()),
   ]);
   return true;
 }
@@ -193,7 +195,7 @@ async function versions(e, l) {
 }
 /** Films vus dans une salle : numéro TMDB ; films des indépendants : date de sortie */
 async function relier(e) {
-  const t = now(), old = new Date().getFullYear() - 2 + "-12-31";
+  const t = now(), old = VIEUX();
   const a = (await e.DB.prepare("select ac,titre,sortie,affiche from trouves where tmdb is null and (wiki is null or wiki<?) limit 50").bind(t - 15 * JOUR).all()).results;
   if (a.length) {
     const b = await sparql(`SELECT ?a ?t WHERE { VALUES ?a { ${a.map(x => `"${x.ac}"`).join(" ")} } ?f wdt:P1265 ?a; wdt:P4947 ?t }`);
@@ -288,6 +290,7 @@ export default {
       if (u.pathname === "/ressorties") return txtj(await ressorties(e), 600);
       if ((m = u.pathname.match(/^\/film\/(\d{1,8})$/))) return txtj(await fiche(e, +m[1]), 300);
       if ((m = u.pathname.match(/^\/horaires\/(\d{1,8})(?:\/(\d{1,12}))?$/))) return txtj(await horaires(e, +m[1], +m[2]), 300);
+      if ((m = u.pathname.match(/^\/ac\/(\d{1,12})$/))) return json(await e.DB.prepare("select coalesce((select tmdb from films where ac=?1),(select tmdb from trouves where ac=?1)) tmdb").bind(+m[1]).first(), 200, 3600);
       if (u.pathname === "/affiche") return json((await e.DB.prepare("select ac,titre from encours where vu>? limit 500").bind(now() - 4 * JOUR).all()).results, 200, 3600);
       if (u.pathname === "/") return json({
         films: await e.DB.prepare("select count(*) n, count(ac) ac, count(lu) lu from films").first(), villes: await e.DB.prepare("select count(*) n, count(dates) dates from villes").first(),

@@ -20,6 +20,10 @@ final class Tests: XCTestCase {
         XCTAssertEqual(TMDB.logos(j, titre: "Spider-Man : Homecoming").sur, ["/en.png"])
         XCTAssertTrue(TMDB.quebecois("SPIDER-MAN LOIN DES SIENS", "Spider-Man : Far From Home", "Spider-Man : Loin des siens"))
         XCTAssertEqual(TMDB.nomSaga("Harry Potter - Saga"), "Harry Potter")
+        let s = ACFilm(movie: 276608, title: "Spider-Man: Brand New Day", original: "Spider-Man: Brand New Day", years: [2026], year: 2026, runtime: nil, genres: [], director: "", poster: nil, seances: [])
+        XCTAssertTrue(Match.same(title: "Spider-Man : Brand New Day", original: "Spider-Man: Brand New Day", year: 2026, s))
+        XCTAssertTrue(Match.same(title: "Spider-Man : Brand New Day", original: "Spider-Man: Brand New Day", year: 2026, ACFilm(movie: 1, title: "Spider-Man : (Brand New) Brand New Day", original: "", years: [2026], year: 2026, runtime: nil, genres: [], director: "", poster: nil, seances: [])))
+        XCTAssertTrue(Affiche.old(Film(id: 969681, title: "Spider-Man : Brand New Day", release: Jour.iso(.now.addingTimeInterval(-120 * 86400)))))
     }
     func testLibre() {
         XCTAssertNotNil(TMDB.libre(["homepage": "https://youtu.be/abcdefghijk"], 1)); XCTAssertNil(TMDB.libre(["homepage": "https://www.youtube.com/@chaine"], 1)); XCTAssertNil(TMDB.libre(["homepage": "https://www.film.com"], 1))

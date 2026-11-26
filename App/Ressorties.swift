@@ -125,6 +125,22 @@ struct Horaires: Codable {
         Disk.write(key, Data((v ?? "").utf8))
         return v.flatMap { Int($0) }
     }
+    private struct Num: Decodable { var tmdb: Int? }
+    /// Fiche AlloCiné → numéro TMDB : la base d’abord, puis Wikidata
+    func tmdb(ac: Int, base: Bool = false) async -> Int? {
+        if let n = await get("ac/\(ac)", ttl: 86400, as: Num.self)?.tmdb { return n }
+        guard !base, !TMDB.demo else { return nil }
+        let key = "wda:\(ac)"
+        if let o = Disk.read(key), o.age < 7 * 86400 { return String(data: o.data, encoding: .utf8).flatMap { Int($0) } }
+        var c = URLComponents(string: "https://query.wikidata.org/sparql")!
+        c.queryItems = [URLQueryItem(name: "format", value: "json"), URLQueryItem(name: "query", value: "SELECT ?t WHERE { ?f wdt:P1265 \"\(ac)\"; wdt:P4947 ?t } LIMIT 1")]
+        var r = URLRequest(url: c.url!, timeoutInterval: 8)
+        r.setValue("mon-cine-perso/1.0", forHTTPHeaderField: "User-Agent")
+        guard let (d, res) = try? await URLSession.shared.data(for: r), (res as? HTTPURLResponse)?.statusCode == 200, let j = (try? JSONSerialization.jsonObject(with: d)) as? J else { return nil }
+        let v = ((((j["results"] as? J)?["bindings"] as? [J])?.first?["t"] as? J)?["value"] as? String)
+        Disk.write(key, Data((v ?? "").utf8))
+        return v.flatMap { Int($0) }
+    }
     /// Seuls des numéros de films partent au serveur
     func suivre(_ ids: [Int]) async {
         guard !TMDB.demo, !ids.isEmpty, let u = Self.base?.appending(path: "suivre") else { return }
