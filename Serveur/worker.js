@@ -30,7 +30,7 @@ function iso(d) {
 }
 // « (version longue) », « - version restaurée », « Director’s cut »… : la même œuvre sous une autre fiche AlloCiné
 const VERSION = /version (longue|restaur|int[ée]grale|remast|extended|in[ée]dite|noir|r[ée]alisateur|du r[ée]al|originale|4k)|director.?s cut|extended|final cut|remaster|restaur[ée]|anniversaire|anniversary|reprise|ressortie|4k/i;
-export const net = s => s.replace(/[(\[][^)\]]*[)\]]/g, " ").replace(/[\s,:–|-]+(version|director.?s cut|extended|final cut|remaster|restaur|reprise|ressortie|4k|\d+\s*(ans|e anniv|ème anniv|th anniv)).*$/i, " ").replace(/\s+/g, " ").replace(/[\s,:–-]+$/, "").trim();
+export const net = s => s.replace(/[(\[][^)\]]*[)\]]/g, " ").replace(/\s["“«][^"”»]{1,30}["”»]\s/g, " ").replace(/[\s,:–|-]+(version|director.?s cut|extended|final cut|remaster|restaur|reprise|ressortie|4k|\d+\s*(ans|e anniv|ème anniv|th anniv)).*$/i, " ").replace(/\s+/g, " ").replace(/[\s,:–-]+$/, "").trim();
 export const plat = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/œ/g, "oe").replace(/[^a-z0-9]+/g, " ").trim();
 /** Salles d’une page de département, et s’il existe une page suivante */
 export function salles(h, n) {

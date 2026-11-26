@@ -15,6 +15,9 @@ enum Match {
     private static func sub(_ s: String, _ re: String, _ by: String = " ") -> String { s.replacingOccurrences(of: re, with: by, options: [.regularExpression, .caseInsensitive]) }
     static func net(_ t: String) -> String {
         var s = sub(t, "[(\\[][^)\\]]*[)\\]]")
+        // Mot entre guillemets ajouté au titre d’une reprise : Spider-Man: "Brand New" Brand New Day
+        let g = sub(s, "\\s[\"“«][^\"”»]{1,30}[\"”»]\\s")
+        if mots(g).count >= 2 { s = g }
         s = sub(s, "(\\s[-–|]|[,:])\\s*(version|vo|vf|vost\\w*|4k|imax|reprise|ressortie|cin[ée].?club|restaur\\S*|\\d+\\s*ans).*$")
         s = sub(s, "\\b(version (longue|restaur\\S*|int[ée]grale|remast\\S*|in[ée]dite)|final cut|4k|vostf?r?|imax|director.?s cut|\\d+(e|ème|th)? anni\\S*)\\b")
         return sub(sub(s, "\\s+"), "[\\s,:–-]+$", "").trimmingCharacters(in: .whitespaces)
