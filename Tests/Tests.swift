@@ -10,7 +10,7 @@ final class Tests: XCTestCase {
         XCTAssertFalse(Match.same(["Shrek"], ["Shrek 2"])); XCTAssertTrue(Match.same(["Shrek"], ["Shrek (reprise)"])); XCTAssertFalse(Match.same(["Alien"], ["Aliens"]))
         XCTAssertEqual(Match.net("Interstellar (VOST) - Reprise"), "Interstellar")
     }
-    func testVersions() {
+    @MainActor func testVersions() {
         let f = ACFilm(movie: 9, title: "Le Seigneur des Anneaux, Le Retour du Roi (version longue)", original: "", years: [2026], year: 2026, runtime: 263, genres: [], director: "", poster: nil, seances: [])
         XCTAssertTrue(Match.same(title: "Le Seigneur des anneaux : Le Retour du roi", original: "The Lord of the Rings: The Return of the King", year: 2003, f))
         XCTAssertEqual(Match.variantes(f.title).first, "Le Seigneur des Anneaux, Le Retour du Roi"); XCTAssertTrue(f.reissue); XCTAssertFalse(Match.version("Le Retour du roi"))
