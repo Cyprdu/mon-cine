@@ -126,7 +126,8 @@ async function departement(e) {
   return true;
 }
 async function salle(e) {
-  const t = now(), s = await e.DB.prepare("select id from salles where vu>?1-5184000 and (lu is null or (n>0 and lu<?1-172800) or (n=0 and lu<?1-345600)) order by (lu is not null), lu limit 1").bind(t).first();
+  const t = now(), s = await e.DB.prepare("select id from salles where lu is null and vu>?1-5184000 limit 1").bind(t).first()
+    || await e.DB.prepare("select id from salles where lu<?1-172800 and vu>?1-5184000 and (n>0 or lu<?1-345600) order by lu limit 1").bind(t).first();
   if (!s) return false;
   const h = await page(e, `https://www.allocine.fr/seance/salle_gen_csalle=${s.id}.html`);
   if (h === null) return true;
@@ -232,7 +233,8 @@ async function film(e) {
   return true;
 }
 async function ville(e) {
-  const t = now(), v = await e.DB.prepare("select ac,loc from villes where lu is null or lu<? order by (lu is not null), lu limit 1").bind(t - 4 * JOUR).first();
+  const t = now(), v = await e.DB.prepare("select ac,loc from villes where lu is null limit 1").first()
+    || await e.DB.prepare("select ac,loc from villes where lu<? order by lu limit 1").bind(t - 4 * JOUR).first();
   if (!v) return false;
   const h = await page(e, `${AC}${v.ac}/pres-de-${v.loc}/`);
   if (h !== null) await e.DB.prepare("update villes set dates=?,lu=? where ac=? and loc=?").bind(JSON.stringify(dates(h)), t, v.ac, v.loc).run();

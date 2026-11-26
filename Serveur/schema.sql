@@ -9,3 +9,8 @@ create table if not exists trouves(ac integer primary key, titre text, sortie te
 create table if not exists ind(id text primary key, tmdb integer, titre text, cine integer, nom text, ville text, adr text, lat real, lon real, debut text, version text, url text, affiche text, vu integer) without rowid;
 create index if not exists ind_tmdb on ind(tmdb);
 create table if not exists tmeta(tmdb integer primary key, titre text, affiche text, sortie text);
+-- Index : chaque minute, le serveur va droit à la prochaine salle ou ville au lieu de relire la table
+create index if not exists salles_lu on salles(lu, vu);
+create index if not exists villes_lu on villes(lu);
+create index if not exists films_ac on films(ac);
+create index if not exists tmeta_sortie on tmeta(sortie);
